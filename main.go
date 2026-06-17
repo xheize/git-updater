@@ -44,7 +44,8 @@ type JobResponse struct {
 }
 
 type UpdateResult struct {
-	NoChanges bool
+	NoChanges             bool
+	ConflictedAndReverted bool
 }
 
 type RepoQueue struct {
@@ -81,7 +82,7 @@ func repoWorker(repo string, q *RepoQueue) {
 		var res UpdateResult
 		var err error
 
-		// Retry loop to handle optimistic concurrency (e.g. manual push by user)
+		// Retry loop to handle optimistic concurrency (e.g. network/push blips)
 		const maxAttempts = 3
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			res, err = performUpdate(job.Request)
@@ -161,6 +162,13 @@ func main() {
 			})
 		}
 
+		if res.Result.ConflictedAndReverted {
+			return c.JSON(fiber.Map{
+				"status":  "conflicted_and_reverted",
+				"message": "conflict detected with user commits; changes were committed and immediately reverted to preserve user commits",
+			})
+		}
+
 		return c.JSON(fiber.Map{
 			"status":  "success",
 			"message": "successfully updated " + req.FilePath + " and pushed to " + req.Branch,
@@ -189,9 +197,9 @@ func performUpdate(req UpdateRequest) (UpdateResult, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// 2. Clone repository (depth 1 to make it fast)
+	// 2. Clone repository (do NOT use depth 1 so we can merge/pull/revert properly)
 	gitSSHCmd := "ssh -o StrictHostKeyChecking=no"
-	cloneCmd := exec.Command("git", "clone", "-b", req.Branch, "--depth", "1", req.Repository, tmpDir)
+	cloneCmd := exec.Command("git", "clone", "-b", req.Branch, req.Repository, tmpDir)
 	cloneCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
 	if out, err := cloneCmd.CombinedOutput(); err != nil {
 		return result, fmt.Errorf("failed to clone repository: %s: %w", string(out), err)
@@ -237,7 +245,7 @@ func performUpdate(req UpdateRequest) (UpdateResult, error) {
 		return result, nil
 	}
 
-	// 6. Commit
+	// 6. Commit locally
 	addCmd := exec.Command("git", "add", req.FilePath)
 	addCmd.Dir = tmpDir
 	if out, err := addCmd.CombinedOutput(); err != nil {
@@ -250,12 +258,69 @@ func performUpdate(req UpdateRequest) (UpdateResult, error) {
 		return result, fmt.Errorf("failed to commit changes: %s: %w", string(out), err)
 	}
 
-	// 7. Push
+	// 7. Pull to check for remote updates and conflicts
+	pullCmd := exec.Command("git", "pull", "origin", req.Branch)
+	pullCmd.Dir = tmpDir
+	pullCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
+	pullOut, pullErr := pullCmd.CombinedOutput()
+
+	if pullErr != nil {
+		log.Printf("[Worker] Pull failed (possible conflict): %s. Reverting update.", string(pullOut))
+
+		// Abort the failed merge/pull
+		abortCmd := exec.Command("git", "merge", "--abort")
+		abortCmd.Dir = tmpDir
+		_ = abortCmd.Run()
+
+		// 8. Revert flow:
+		// Reset local branch to the latest remote state
+		resetCmd := exec.Command("git", "reset", "--hard", "origin/"+req.Branch)
+		resetCmd.Dir = tmpDir
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			return result, fmt.Errorf("failed to reset to remote: %s: %w", string(out), err)
+		}
+
+		// Re-apply the changes to create the conflicted commit history
+		if err := os.WriteFile(fullFilePath, updatedBytes, 0644); err != nil {
+			return result, fmt.Errorf("failed to write target file in revert flow: %w", err)
+		}
+
+		addConfCmd := exec.Command("git", "add", req.FilePath)
+		addConfCmd.Dir = tmpDir
+		_ = addConfCmd.Run()
+
+		commitConfCmd := exec.Command("git", "commit", "-m", "chore: auto-update "+req.FilePath+" (conflicted)")
+		commitConfCmd.Dir = tmpDir
+		if out, err := commitConfCmd.CombinedOutput(); err != nil {
+			return result, fmt.Errorf("failed to commit conflicted update: %s: %w", string(out), err)
+		}
+
+		// Revert that commit immediately to restore user's original commit state
+		revertCmd := exec.Command("git", "revert", "HEAD", "--no-edit")
+		revertCmd.Dir = tmpDir
+		revertCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
+		if out, err := revertCmd.CombinedOutput(); err != nil {
+			return result, fmt.Errorf("failed to revert conflicted commit: %s: %w", string(out), err)
+		}
+
+		// Push both the conflicted commit and the revert commit to remote
+		pushCmd := exec.Command("git", "push", "origin", req.Branch)
+		pushCmd.Dir = tmpDir
+		pushCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
+		if out, err := pushCmd.CombinedOutput(); err != nil {
+			return result, fmt.Errorf("failed to push revert flow: %s: %w", string(out), err)
+		}
+
+		result.ConflictedAndReverted = true
+		return result, nil
+	}
+
+	// 9. Push if pull was clean
 	pushCmd := exec.Command("git", "push", "origin", req.Branch)
 	pushCmd.Dir = tmpDir
 	pushCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
 	if out, err := pushCmd.CombinedOutput(); err != nil {
-		return result, fmt.Errorf("failed to push changes (might need retry): %s: %w", string(out), err)
+		return result, fmt.Errorf("failed to push changes: %s: %w", string(out), err)
 	}
 
 	return result, nil
