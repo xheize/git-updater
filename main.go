@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -28,6 +30,73 @@ type UpdateRequest struct {
 type PathPart struct {
 	Key   string
 	Index int // -1 if it's not a slice index
+}
+
+// Job represents a queued update task
+type Job struct {
+	Request      UpdateRequest
+	ResponseChan chan JobResponse
+}
+
+type JobResponse struct {
+	Result UpdateResult
+	Err    error
+}
+
+type UpdateResult struct {
+	NoChanges bool
+}
+
+type RepoQueue struct {
+	jobs chan Job
+}
+
+var (
+	repoQueues = make(map[string]*RepoQueue)
+	queuesMu   sync.Mutex
+)
+
+// getRepoQueue returns or creates a queue and worker for a specific repository
+func getRepoQueue(repo string) *RepoQueue {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+
+	q, exists := repoQueues[repo]
+	if !exists {
+		q = &RepoQueue{
+			jobs: make(chan Job, 100),
+		}
+		repoQueues[repo] = q
+		go repoWorker(repo, q)
+	}
+	return q
+}
+
+// repoWorker processes updates for a specific repository sequentially
+func repoWorker(repo string, q *RepoQueue) {
+	log.Printf("[Worker: %s] Started", repo)
+	for job := range q.jobs {
+		log.Printf("[Worker: %s] Processing job for branch: %s, file: %s", repo, job.Request.Branch, job.Request.FilePath)
+
+		var res UpdateResult
+		var err error
+
+		// Retry loop to handle optimistic concurrency (e.g. manual push by user)
+		const maxAttempts = 3
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			res, err = performUpdate(job.Request)
+			if err == nil {
+				log.Printf("[Worker: %s] Job completed successfully on attempt %d", repo, attempt)
+				break
+			}
+			log.Printf("[Worker: %s] Attempt %d/%d failed: %v", repo, attempt, maxAttempts, err)
+		}
+
+		job.ResponseChan <- JobResponse{
+			Result: res,
+			Err:    err,
+		}
+	}
 }
 
 func main() {
@@ -60,105 +129,35 @@ func main() {
 			req.Branch = "main"
 		}
 
-		log.Printf("Received update request for repo: %s, branch: %s, file: %s", req.Repository, req.Branch, req.FilePath)
+		q := getRepoQueue(req.Repository)
 
-		// 1. Create temporary directory
-		tmpDir, err := os.MkdirTemp("", "git-updater-")
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to create temp dir: " + err.Error(),
-			})
+		responseChan := make(chan JobResponse)
+		job := Job{
+			Request:      req,
+			ResponseChan: responseChan,
 		}
-		defer os.RemoveAll(tmpDir)
 
-		// 2. Clone repository
-		// Disable StrictHostKeyChecking for github.com dynamically
-		gitSSHCmd := "ssh -o StrictHostKeyChecking=no"
-		cloneCmd := exec.Command("git", "clone", "-b", req.Branch, "--depth", "1", req.Repository, tmpDir)
-		cloneCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
-		if out, err := cloneCmd.CombinedOutput(); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to clone repository: " + err.Error(),
-				"logs":  string(out),
+		// Enqueue the job
+		select {
+		case q.jobs <- job:
+		default:
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "job queue for repository is full, try again later",
 			})
 		}
 
-		// Configure local git user for committing
-		configUserCmd := exec.Command("git", "config", "user.name", "git-updater")
-		configUserCmd.Dir = tmpDir
-		_ = configUserCmd.Run()
-
-		configEmailCmd := exec.Command("git", "config", "user.email", "git-updater@lxc.local")
-		configEmailCmd.Dir = tmpDir
-		_ = configEmailCmd.Run()
-
-		// 3. Read and parse YAML file
-		fullFilePath := filepath.Join(tmpDir, req.FilePath)
-		yamlBytes, err := os.ReadFile(fullFilePath)
-		if err != nil {
+		// Wait for the result from the worker
+		res := <-responseChan
+		if res.Err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to read target file: " + err.Error(),
+				"error": res.Err.Error(),
 			})
 		}
 
-		// 4. Update the specified YAML keys
-		updatedBytes, err := processYAMLUpdates(yamlBytes, req.Updates)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to update YAML: " + err.Error(),
-			})
-		}
-
-		// Write updated YAML back to file
-		if err := os.WriteFile(fullFilePath, updatedBytes, 0644); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to write target file: " + err.Error(),
-			})
-		}
-
-		// 5. Check git status
-		statusCmd := exec.Command("git", "status", "--porcelain")
-		statusCmd.Dir = tmpDir
-		statusOut, err := statusCmd.Output()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to run git status: " + err.Error(),
-			})
-		}
-
-		if len(strings.TrimSpace(string(statusOut))) == 0 {
+		if res.Result.NoChanges {
 			return c.JSON(fiber.Map{
 				"status":  "no_changes",
 				"message": "no changes detected in the YAML file",
-			})
-		}
-
-		// 6. Commit and Push
-		addCmd := exec.Command("git", "add", req.FilePath)
-		addCmd.Dir = tmpDir
-		if out, err := addCmd.CombinedOutput(); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to stage file: " + err.Error(),
-				"logs":  string(out),
-			})
-		}
-
-		commitCmd := exec.Command("git", "commit", "-m", "chore: auto-update "+req.FilePath+" via webhook")
-		commitCmd.Dir = tmpDir
-		if out, err := commitCmd.CombinedOutput(); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to commit changes: " + err.Error(),
-				"logs":  string(out),
-			})
-		}
-
-		pushCmd := exec.Command("git", "push", "origin", req.Branch)
-		pushCmd.Dir = tmpDir
-		pushCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
-		if out, err := pushCmd.CombinedOutput(); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to push changes: " + err.Error(),
-				"logs":  string(out),
 			})
 		}
 
@@ -177,6 +176,89 @@ func main() {
 	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
+}
+
+// performUpdate clones, updates, commits and pushes changes for a request
+func performUpdate(req UpdateRequest) (UpdateResult, error) {
+	var result UpdateResult
+
+	// 1. Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "git-updater-")
+	if err != nil {
+		return result, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// 2. Clone repository (depth 1 to make it fast)
+	gitSSHCmd := "ssh -o StrictHostKeyChecking=no"
+	cloneCmd := exec.Command("git", "clone", "-b", req.Branch, "--depth", "1", req.Repository, tmpDir)
+	cloneCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
+	if out, err := cloneCmd.CombinedOutput(); err != nil {
+		return result, fmt.Errorf("failed to clone repository: %s: %w", string(out), err)
+	}
+
+	// Configure local git identity
+	configUserCmd := exec.Command("git", "config", "user.name", "git-updater")
+	configUserCmd.Dir = tmpDir
+	_ = configUserCmd.Run()
+
+	configEmailCmd := exec.Command("git", "config", "user.email", "git-updater@lxc.local")
+	configEmailCmd.Dir = tmpDir
+	_ = configEmailCmd.Run()
+
+	// 3. Read and parse YAML file
+	fullFilePath := filepath.Join(tmpDir, req.FilePath)
+	yamlBytes, err := os.ReadFile(fullFilePath)
+	if err != nil {
+		return result, fmt.Errorf("failed to read target file: %w", err)
+	}
+
+	// 4. Update the specified YAML keys
+	updatedBytes, err := processYAMLUpdates(yamlBytes, req.Updates)
+	if err != nil {
+		return result, fmt.Errorf("failed to update YAML: %w", err)
+	}
+
+	// Write updated YAML back to file
+	if err := os.WriteFile(fullFilePath, updatedBytes, 0644); err != nil {
+		return result, fmt.Errorf("failed to write target file: %w", err)
+	}
+
+	// 5. Check git status
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = tmpDir
+	statusOut, err := statusCmd.Output()
+	if err != nil {
+		return result, fmt.Errorf("failed to run git status: %w", err)
+	}
+
+	if len(strings.TrimSpace(string(statusOut))) == 0 {
+		result.NoChanges = true
+		return result, nil
+	}
+
+	// 6. Commit
+	addCmd := exec.Command("git", "add", req.FilePath)
+	addCmd.Dir = tmpDir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return result, fmt.Errorf("failed to stage file: %s: %w", string(out), err)
+	}
+
+	commitCmd := exec.Command("git", "commit", "-m", "chore: auto-update "+req.FilePath+" via webhook")
+	commitCmd.Dir = tmpDir
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		return result, fmt.Errorf("failed to commit changes: %s: %w", string(out), err)
+	}
+
+	// 7. Push
+	pushCmd := exec.Command("git", "push", "origin", req.Branch)
+	pushCmd.Dir = tmpDir
+	pushCmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCmd)
+	if out, err := pushCmd.CombinedOutput(); err != nil {
+		return result, fmt.Errorf("failed to push changes (might need retry): %s: %w", string(out), err)
+	}
+
+	return result, nil
 }
 
 // processYAMLUpdates processes multiple updates on a multi-document YAML content
