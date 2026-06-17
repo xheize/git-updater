@@ -1,0 +1,35 @@
+# Woodpecker CI Pipeline Configuration for git-updater
+# Documentation: https://woodpecker-ci.org/
+
+variables:
+  - &golang_image 'golang:1.25.10-alpine'
+  - &registry 'registry.xheize.cc'
+  - &repo 'registry.xheize.cc/git-updater'
+
+steps:
+  # Step 1: Format check and Static Analysis (Go Vet)
+  - name: lint-and-vet
+    image: *golang_image
+    commands:
+      - go fmt ./...
+      - go vet ./...
+
+  # Step 2: Build and Push Docker image using BuildKit
+  - name: build-and-push
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      remote_builders: tcp://buildkit.buildkit.svc.cluster.local:2395
+      registry: *registry
+      repo: *repo
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+      platforms:
+        - linux/amd64
+        - linux/arm64
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+    when:
+      - branch: dev
