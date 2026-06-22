@@ -126,11 +126,11 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 		for {
 			select {
 			case job := <-g.jobQueue:
-				g.work(job)
+				g.Work(job)
 			case <-ctx.Done():
 				log.Printf("waiting for %d jobs to complete", len(g.jobQueue))
 				for job := range g.jobQueue {
-					g.work(job)
+					g.Work(job)
 				}
 				log.Printf("Git worker stopped")
 				return
@@ -139,7 +139,7 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 	}()
 }
 
-func (g *gitManager) work(job Job) bool {
+func (g *gitManager) Work(job Job) bool {
 	data, err := os.ReadFile(job.File)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
