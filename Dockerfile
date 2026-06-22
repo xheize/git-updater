@@ -8,10 +8,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY main.go ./
+COPY . ./
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o git-updater main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o git-updater .
 
 # Final stage
 FROM alpine:3.20
