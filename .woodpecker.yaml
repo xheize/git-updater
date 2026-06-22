@@ -15,6 +15,7 @@ steps:
       - go vet ./...
     when:
       event: push
+      branch: dev
 
   - name: test
     image: *golang_image
