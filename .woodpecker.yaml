@@ -3,8 +3,6 @@
 
 variables:
   - &golang_image 'golang:1.25.10-alpine'
-  - &registry from_secret: registry_url
-  - &repo '${registry}/git-updater'
 
 steps:
   # Step 1: Format check and Static Analysis (Go Vet)
@@ -22,8 +20,10 @@ steps:
     image: woodpeckerci/plugin-docker-buildx
     settings:
       remote_builders: tcp://buildkit.buildkit.svc.cluster.local:2395
-      registry: *registry
-      repo: *repo
+      registry:
+        from_secret: registry_url
+      repo: 
+        from_secret: registry_repo_url
       username:
         from_secret: registry_username
       password:
