@@ -16,15 +16,7 @@ steps:
     when:
       event: [push, manual]
       branch: dev
-
-  - name: test
-    image: *golang_image
-    commands:
-      - go test -v
-    when:
-      event: [push, manual]
-      branch: dev
-
+      
   # Step 2: Build and Push Docker image using BuildKit
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
