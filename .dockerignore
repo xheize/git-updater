@@ -1,0 +1,25 @@
+# Git and CI/CD
+.git
+.github
+.woodpecker.yaml
+
+# Local workspaces & temp files
+workspace/
+tmp/
+*.log
+
+# Build outputs & binaries
+git-updater
+git-updater-cli
+*.exe
+*.test
+bin/
+dist/
+
+# Development environments
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+*~
