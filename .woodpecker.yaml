@@ -14,7 +14,7 @@ steps:
       - go fmt ./...
       - go vet ./...
     when:
-      event: push
+      event: [push, manual]
       branch: dev
 
   - name: test
@@ -22,7 +22,7 @@ steps:
     commands:
       - go test -v
     when:
-      event: push
+      event: [push, manual]
       branch: dev
 
   # Step 2: Build and Push Docker image using BuildKit
@@ -43,7 +43,7 @@ steps:
         - latest
         - ${CI_COMMIT_SHA:0:8}
     when:
-      event: push
+      event: [push, manual]
       branch: [dev, main]
 
   
