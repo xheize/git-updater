@@ -3,8 +3,8 @@
 
 variables:
   - &golang_image 'golang:1.25.10-alpine'
-  - &registry 'registry.xheize.cc'
-  - &repo 'registry.xheize.cc/git-updater'
+  - &registry from_secret: registry_url
+  - &repo '${registry}/git-updater'
 
 steps:
   # Step 1: Format check and Static Analysis (Go Vet)
@@ -18,6 +18,9 @@ steps:
     image: *golang_image
     commands:
       - go test -v
+    when:
+      event: push
+      branch: dev
 
   # Step 2: Build and Push Docker image using BuildKit
   - name: build-and-push
@@ -37,4 +40,7 @@ steps:
         - latest
         - ${CI_COMMIT_SHA:0:8}
     when:
-      - branch: dev
+      event: push
+      branch: [dev, main]
+
+  
