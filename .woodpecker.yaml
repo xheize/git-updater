@@ -13,6 +13,8 @@ steps:
     commands:
       - go fmt ./...
       - go vet ./...
+    when:
+      event: push
 
   - name: test
     image: *golang_image
