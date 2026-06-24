@@ -17,23 +17,17 @@ steps:
       
   # Step 2: Build and Push Docker image using BuildKit
   - name: build-and-push
-    image: woodpeckerci/plugin-docker-buildx
-    settings:
-      remote_builders: tcp://buildkit.buildkit.svc.cluster.local:2395
-      registry:
-        from_secret: registry_url
-      repo: 
-        from_secret: registry_repo_url
-      username:
-        from_secret: registry_username
-      password:
-        from_secret: registry_password
-      platforms:
-        - linux/amd64
-        - linux/arm64
-      tags:
-        - latest
-        - ${CI_COMMIT_SHA:0:8}
+    image: moby/buildkit:v0.19.0-buildctl
+    commands:
+      # BuildKit 데몬 주소 환경변수 지정
+      - export BUILDKIT_HOST=tcp://buildkit.buildkit.svc.cluster.local:2395
+      # 도커 레지스트리 인증 정보 세팅 (필요시 ~/.docker/config.json 생성 스크립트 추가)
+      # 빌드 및 푸시 수행
+      - buildctl build \
+          --frontend=dockerfile.v0 \
+          --local context=. \
+          --local dockerfile=. \
+          --output type=image,name=registry.xheize.cc/git-updater:latest,push=true
     when:
       event: [push, manual]
       branch: [dev, main]
