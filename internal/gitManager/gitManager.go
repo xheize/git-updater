@@ -25,10 +25,11 @@ const (
 type GitAuthType string
 
 type gitManager struct {
-	repoURL   string
-	repo      *git.Repository
-	jobQueue  chan Job
-	workspace string
+	repoURL    string
+	repo       *git.Repository
+	jobQueue   chan Job
+	workspace  string
+	autoUpdate bool
 }
 
 type Job struct {
@@ -50,6 +51,12 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	fmt.Printf("repoUrl: %s\n", repoUrl)
 	fmt.Printf("workspace: %s\n", workspace)
 
+	autoUpdate := false
+	if os.Getenv("AUTO_UPDATE") == "true" {
+		autoUpdate = true
+	}
+	fmt.Printf("Auto Update set: %v\n", autoUpdate)
+
 	gitAuthOptions, err := getGitAuth()
 	if err != nil {
 		return nil
@@ -69,10 +76,11 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	fmt.Printf("Repo Clone success!")
 
 	return &gitManager{
-		repoURL:   repoUrl,
-		repo:      gitRepo,
-		jobQueue:  _jobQueue,
-		workspace: workspace,
+		repoURL:    repoUrl,
+		repo:       gitRepo,
+		jobQueue:   _jobQueue,
+		workspace:  workspace,
+		autoUpdate: autoUpdate,
 	}
 }
 
