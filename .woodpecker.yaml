@@ -3,6 +3,7 @@
 
 variables:
   - &golang_image 'golang:1.25.10-alpine'
+  - &buildkit_image 'moby/buildkit:v0.31.0'
 
 steps:
   # Step 1: Format check and Static Analysis (Go Vet)
@@ -16,13 +17,23 @@ steps:
       branch: dev
       
   # Step 2: Build and Push Docker image using BuildKit
-  - name: build-and-push
-    image: moby/buildkit:v0.31.0
+  - name: build-and-push-nightly
+    image: *buildkit_image
     commands:
-      # BuildKit 데몬 주소 환경변수 지정
-      - export BUILDKIT_HOST=tcp://buildkit.buildkit.svc.cluster.local:2395
-      # 도커 레지스트리 인증 정보 세팅 (필요시 ~/.docker/config.json 생성 스크립트 추가)
-      # 빌드 및 푸시 수행
+      - buildctl build \
+          --addr tcp://buildkit.buildkit.svc.cluster.local:2395 \
+          --frontend=dockerfile.v0 \
+          --local context=. \
+          --local dockerfile=. \
+          --output type=image,name=registry.xheize.cc/git-updater:nightly-${CI_COMMIT_SHA:0:8},push=true
+    when:
+      event: [manual]
+      branch: [dev]
+      
+  # Step 3: Build and Push Docker image using BuildKit
+  - name: build-and-push-latest
+    image: *buildkit_image
+    commands:
       - buildctl build \
           --addr tcp://buildkit.buildkit.svc.cluster.local:2395 \
           --frontend=dockerfile.v0 \
@@ -31,6 +42,4 @@ steps:
           --output type=image,name=registry.xheize.cc/git-updater:latest,push=true
     when:
       event: [push, manual]
-      branch: [dev, main]
-
-  
+      branch: [main]
