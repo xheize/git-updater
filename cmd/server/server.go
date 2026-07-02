@@ -20,7 +20,7 @@ func main() {
 		repoURL = os.Getenv("GIT_REPO_URL")
 	}
 	if repoURL == "" {
-		repoURL = "https://github.com/xheize/git-updater.git"
+		log.Fatalf("Failed to get git repo url. check env setting")
 	}
 
 	gitMgr := gitManager.New(repoURL, jobQueue)

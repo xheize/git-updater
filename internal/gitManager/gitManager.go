@@ -134,7 +134,9 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 		for {
 			select {
 			case job := <-g.jobQueue:
-				g.Work(job)
+				if g.autoUpdate {
+					g.Work(job)
+				}
 			case <-ctx.Done():
 				log.Printf("waiting for %d jobs to complete", len(g.jobQueue))
 				for job := range g.jobQueue {
