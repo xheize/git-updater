@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
@@ -30,6 +32,7 @@ type gitManager struct {
 	jobQueue   chan Job
 	workspace  string
 	autoUpdate bool
+	authOpts   []client.Option
 }
 
 type Job struct {
@@ -62,7 +65,32 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 		return nil
 	}
 
-	gitRepo, err := git.PlainClone(workspace, &git.CloneOptions{
+	var gitRepo *git.Repository
+	gitRepo, err = git.PlainOpen(workspace)
+	if err == nil {
+		fmt.Printf("Workspace exists. Opened existing repository.\n")
+		manager := &gitManager{
+			repoURL:    repoUrl,
+			repo:       gitRepo,
+			jobQueue:   _jobQueue,
+			workspace:  workspace,
+			autoUpdate: autoUpdate,
+			authOpts:   gitAuthOptions,
+		}
+		syncErr := manager.syncRepository()
+		if syncErr == nil {
+			fmt.Printf("Initial repository sync success!\n")
+			return manager
+		}
+		log.Printf("Initial sync failed: %v. Re-creating workspace.\n", syncErr)
+	}
+
+	if removeErr := os.RemoveAll(workspace); removeErr != nil {
+		log.Println("Failed to clear workspace directory:", removeErr)
+		return nil
+	}
+
+	gitRepo, err = git.PlainClone(workspace, &git.CloneOptions{
 		URL:               repoUrl,
 		ClientOptions:     gitAuthOptions,
 		NoCheckout:        false,
@@ -73,7 +101,7 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 		log.Println("Clone failed:", err)
 		return nil
 	}
-	fmt.Printf("Repo Clone success!")
+	fmt.Printf("Repo Clone success!\n")
 
 	return &gitManager{
 		repoURL:    repoUrl,
@@ -81,6 +109,7 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 		jobQueue:   _jobQueue,
 		workspace:  workspace,
 		autoUpdate: autoUpdate,
+		authOpts:   gitAuthOptions,
 	}
 }
 
@@ -129,6 +158,48 @@ func getGitAuth() ([]client.Option, error) {
 	}
 }
 
+func (g *gitManager) syncRepository() error {
+	w, err := g.repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	// 1. Fetch latest commits from remote
+	err = g.repo.Fetch(&git.FetchOptions{
+		RemoteName:    "origin",
+		ClientOptions: g.authOpts,
+		Force:         true,
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return fmt.Errorf("failed to fetch: %w", err)
+	}
+
+	// 2. Get remote tracking branch for current HEAD
+	head, err := g.repo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get HEAD ref: %w", err)
+	}
+
+	branchName := head.Name().Short()
+	remoteRefName := plumbing.ReferenceName(fmt.Sprintf("refs/remotes/origin/%s", branchName))
+
+	remoteRef, err := g.repo.Reference(remoteRefName, true)
+	if err != nil {
+		return fmt.Errorf("failed to find remote tracking branch %s: %w", remoteRefName, err)
+	}
+
+	// 3. Reset hard to the remote tracking branch commit
+	err = w.Reset(&git.ResetOptions{
+		Mode:   git.HardReset,
+		Commit: remoteRef.Hash(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to hard reset to remote branch: %w", err)
+	}
+
+	return nil
+}
+
 func (g *gitManager) StartWorker(ctx context.Context) {
 	go func() {
 		for {
@@ -150,12 +221,20 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 }
 
 func (g *gitManager) Work(job Job) bool {
-	data, err := os.ReadFile(job.File)
+	// Sync workspace with remote branch before reading
+	if err := g.syncRepository(); err != nil {
+		fmt.Printf("Failed to sync repository before work: %v\n", err)
+		return false
+	}
+
+	// Read job file from the workspace path
+	filePath := filepath.Join(g.workspace, job.File)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Printf("File %s does not exist\n", job.File)
+			fmt.Printf("File %s does not exist\n", filePath)
 		} else {
-			fmt.Printf("File %s cannot be read: %v\n", job.File, err)
+			fmt.Printf("File %s cannot be read: %v\n", filePath, err)
 		}
 		return false
 	}
@@ -166,12 +245,12 @@ func (g *gitManager) Work(job Job) bool {
 
 	updatedData, err := yaml.ProcessYAMLUpdates(data, update)
 	if err != nil {
-		fmt.Printf("Update failed for file %s: %v\n", job.File, err)
+		fmt.Printf("Update failed for file %s: %v\n", filePath, err)
 		return false
 	}
 
-	if err := os.WriteFile(job.File, updatedData, 0644); err != nil {
-		fmt.Printf("Failed to write file %s: %v\n", job.File, err)
+	if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
+		fmt.Printf("Failed to write file %s: %v\n", filePath, err)
 		return false
 	}
 
@@ -202,7 +281,9 @@ func (g *gitManager) addCommitPush(file string, commitMessage string) bool {
 		return false
 	}
 
-	if err := g.repo.Push(&git.PushOptions{}); err != nil {
+	if err := g.repo.Push(&git.PushOptions{
+		ClientOptions: g.authOpts,
+	}); err != nil {
 		fmt.Printf("Git push failed: %v\n", err)
 		return false
 	}
