@@ -16,6 +16,9 @@ func main() {
 
 	jobQueue := make(chan gitManager.Job, 100)
 	gitMgr := gitManager.New("https://github.com/xheize/git-updater.git", jobQueue)
+	if gitMgr == nil {
+		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
+	}
 	gitMgr.StartWorker(context.Background())
 
 	app := fiber.New(fiber.Config{
