@@ -32,6 +32,7 @@
 | `GIT_SSH_PRIVATE_KEY` | `ssh` 시 필수 | Git 인증에 사용할 SSH Private Key 내용 (String) |
 | `GIT_USERNAME` | `http` 시 필수 | HTTP Basic 인증용 Username |
 | `GIT_PASSWORD` | `http` 시 필수 | HTTP Basic 인증용 Password 또는 Personal Access Token |
+| `GIT_REPOSITORY_URL` | 선택 | 업데이트 대상 Git 저장소 주소 (기본값: `https://github.com/xheize/git-updater.git`, `GIT_REPO_URL`도 호환 지원) |
 | `PORT` | 선택 | API 서버가 리스닝할 포트 (기본값: `3000`) |
 
 ---

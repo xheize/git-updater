@@ -15,7 +15,15 @@ import (
 func main() {
 
 	jobQueue := make(chan gitManager.Job, 100)
-	gitMgr := gitManager.New("https://github.com/xheize/git-updater.git", jobQueue)
+	repoURL := os.Getenv("GIT_REPOSITORY_URL")
+	if repoURL == "" {
+		repoURL = os.Getenv("GIT_REPO_URL")
+	}
+	if repoURL == "" {
+		repoURL = "https://github.com/xheize/git-updater.git"
+	}
+
+	gitMgr := gitManager.New(repoURL, jobQueue)
 	if gitMgr == nil {
 		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
 	}
