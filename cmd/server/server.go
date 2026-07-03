@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -65,6 +67,43 @@ func main() {
 		return c.JSON(fiber.Map{
 			"status":  "success",
 			"message": "successfully updated " + job.File,
+		})
+	})
+
+	app.Post("/api/update", func(c *fiber.Ctx) error {
+		var job gitManager.Job
+		if err := c.BodyParser(&job); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "failed to parse request body: " + err.Error(),
+			})
+		}
+
+		if job.File == "" || job.Image == "" || job.Tag == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "parameters 'file', 'image', and 'tag' are required",
+			})
+		}
+
+		if job.ID == "" {
+			job.ID = fmt.Sprintf("api-%d", time.Now().UnixNano())
+		}
+		if job.Timestamp.IsZero() {
+			job.Timestamp = time.Now()
+		}
+
+		// Enqueue the job
+		select {
+		case jobQueue <- job:
+		default:
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "job queue for repository is full, try again later",
+			})
+		}
+
+		return c.JSON(fiber.Map{
+			"status":  "success",
+			"message": "successfully queued update for " + job.File,
+			"jobId":   job.ID,
 		})
 	})
 
