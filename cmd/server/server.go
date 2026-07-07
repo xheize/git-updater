@@ -33,6 +33,14 @@ func main() {
 	}
 	workerDone := gitMgr.StartWorker()
 
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("WEBHOOK_SECRET")
+	}
+	if apiKey == "" {
+		log.Println("WARNING: API_KEY environment variable is not set. API endpoints will not be authenticated.")
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName: "Git Updater API",
 	})
@@ -49,7 +57,9 @@ func main() {
 		return c.JSON(fiber.Map{"status": "healthy"})
 	})
 
-	app.Post("/webhook", func(c *fiber.Ctx) error {
+	auth := authMiddleware(apiKey)
+
+	app.Post("/webhook", auth, func(c *fiber.Ctx) error {
 		var job gitManager.Job
 		if err := c.BodyParser(&job); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -72,7 +82,7 @@ func main() {
 		})
 	})
 
-	app.Post("/api/update", func(c *fiber.Ctx) error {
+	app.Post("/api/update", auth, func(c *fiber.Ctx) error {
 		var job gitManager.Job
 		if err := c.BodyParser(&job); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -135,4 +145,29 @@ func main() {
 	log.Println("Waiting for worker to finish processing remaining jobs...")
 	<-workerDone
 	log.Println("Server shutdown complete.")
+}
+
+func authMiddleware(apiKey string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if apiKey == "" {
+			return c.Next()
+		}
+
+		authHeader := c.Get("Authorization")
+		token := ""
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			token = authHeader[7:]
+		}
+
+		if token == "" {
+			token = c.Get("X-API-Key")
+		}
+
+		if token != apiKey {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "unauthorized: invalid or missing API key",
+			})
+		}
+		return c.Next()
+	}
 }
