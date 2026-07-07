@@ -1,7 +1,6 @@
 package gitManager
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -200,24 +199,22 @@ func (g *gitManager) syncRepository() error {
 	return nil
 }
 
-func (g *gitManager) StartWorker(ctx context.Context) {
+func (g *gitManager) StartWorker() <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
-			select {
-			case job := <-g.jobQueue:
-				if g.autoUpdate {
-					g.Work(job)
-				}
-			case <-ctx.Done():
-				log.Printf("waiting for %d jobs to complete", len(g.jobQueue))
-				for job := range g.jobQueue {
-					g.Work(job)
-				}
-				log.Printf("Git worker stopped")
+			job, ok := <-g.jobQueue
+			if !ok {
+				log.Println("Job queue closed. Git worker stopping...")
 				return
+			}
+			if g.autoUpdate {
+				g.Work(job)
 			}
 		}
 	}()
+	return done
 }
 
 func (g *gitManager) Work(job Job) bool {
