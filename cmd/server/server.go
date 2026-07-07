@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -29,7 +31,7 @@ func main() {
 	if gitMgr == nil {
 		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
 	}
-	gitMgr.StartWorker(context.Background())
+	workerDone := gitMgr.StartWorker()
 
 	app := fiber.New(fiber.Config{
 		AppName: "Git Updater API",
@@ -107,8 +109,30 @@ func main() {
 		})
 	})
 
-	log.Printf("Server starting on port %s...", port)
-	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+	// Create context that listens for the interrupt signals
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("Server starting on port %s...", port)
+		if err := app.Listen(":" + port); err != nil {
+			log.Printf("Server failed to start: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Gracefully shutting down...")
+
+	// 1. Shutdown Fiber web server first (stop accepting new requests)
+	if err := app.Shutdown(); err != nil {
+		log.Printf("Fiber shutdown error: %v", err)
 	}
+
+	// 2. Close the job queue so the worker knows no more jobs will be submitted
+	close(jobQueue)
+
+	// 3. Wait for the worker to finish processing remaining jobs
+	log.Println("Waiting for worker to finish processing remaining jobs...")
+	<-workerDone
+	log.Println("Server shutdown complete.")
 }
