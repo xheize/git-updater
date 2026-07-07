@@ -22,8 +22,8 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 # Final stage
 FROM alpine:3.20
 
-# Install git, openssh-client, and ca-certificates (needed for clone/push operations over HTTP/SSH)
-RUN apk add --no-cache git openssh-client ca-certificates
+# Install ca-certificates (needed for SSL certificate verification over HTTPS)
+RUN apk add --no-cache ca-certificates
 
 # Create a non-root user/group for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
