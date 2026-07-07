@@ -19,6 +19,7 @@ func main() {
 	fileFlag := flag.String("file", "", "Target YAML file path to update (required)")
 	imageFlag := flag.String("image", "", "Container image name (required)")
 	tagFlag := flag.String("tag", "", "Container image tag (required)")
+	keyFlag := flag.String("key", "", "API key for server authentication (can also be set via GIT_UPDATER_API_KEY env)")
 
 	flag.Parse()
 
@@ -28,6 +29,14 @@ func main() {
 	}
 	if serverURL == "" {
 		serverURL = "http://localhost:3000"
+	}
+
+	apiKey := *keyFlag
+	if apiKey == "" {
+		apiKey = os.Getenv("GIT_UPDATER_API_KEY")
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("API_KEY")
 	}
 
 	// Ensure prefix http:// or https://
@@ -78,6 +87,9 @@ func main() {
 		os.Exit(1)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
