@@ -25,10 +25,11 @@ steps:
           --frontend=dockerfile.v0 \
           --local context=. \
           --local dockerfile=. \
-          --output type=image,name=registry.xheize.cc/git-updater:nightly-${CI_COMMIT_SHA:0:8},push=true
+          --output type=image,name=registry.xheize.cc/git-updater:nightly-${CI_COMMIT_SHA:0:8},push=true \
+          --output type=image,name=registry.xheize.cc/git-updater:nightly,push=true
     when:
-      event: [manual]
-      branch: [dev]
+      event: [push, cron, manual]
+      branch: [main]
       
   # Step 3: Build and Push Docker image using BuildKit
   - name: build-and-push-latest
@@ -39,7 +40,8 @@ steps:
           --frontend=dockerfile.v0 \
           --local context=. \
           --local dockerfile=. \
+          --output type=image,name=registry.xheize.cc/git-updater:${CI_COMMIT_TAG},push=true \
           --output type=image,name=registry.xheize.cc/git-updater:latest,push=true
     when:
-      event: [push, manual]
+      event: [tag]
       branch: [main]
