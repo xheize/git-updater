@@ -13,7 +13,7 @@ steps:
       - go fmt ./...
       - go vet ./...
     when:
-      event: [push, manual]
+      event: [push, pull_request, manual]
       branch: dev
       
   # Step 2: Build and Push Docker image using BuildKit
