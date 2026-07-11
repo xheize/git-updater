@@ -49,7 +49,8 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	if _repoURL == "" {
 		return nil
 	}
-	repoUrl = _repoURL
+	gitAuthMethod := os.Getenv("GIT_AUTH_METHOD")
+	repoUrl = normalizeGitURL(_repoURL, gitAuthMethod)
 	workspace := "./workspace"
 	log.Printf("repoUrl: %s\n", repoUrl)
 	log.Printf("workspace: %s\n", workspace)
@@ -299,4 +300,46 @@ func (g *gitManager) addCommitPush(file string, commitMessage string) bool {
 		return false
 	}
 	return true
+}
+
+func normalizeGitURL(rawURL string, authMethod string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+
+	isHTTPS := strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "http://")
+	isSSH := strings.HasPrefix(rawURL, "git@") || strings.HasPrefix(rawURL, "ssh://")
+
+	if authMethod == "ssh" && isHTTPS {
+		// Convert HTTPS -> SSH (git@host:path)
+		trimmed := rawURL
+		if strings.HasPrefix(trimmed, "https://") {
+			trimmed = strings.TrimPrefix(trimmed, "https://")
+		} else {
+			trimmed = strings.TrimPrefix(trimmed, "http://")
+		}
+
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) == 2 {
+			host := parts[0]
+			path := parts[1]
+			return fmt.Sprintf("git@%s:%s", host, path)
+		}
+	}
+
+	if authMethod == "http" && isSSH {
+		// Convert SSH -> HTTPS
+		if strings.HasPrefix(rawURL, "ssh://git@") {
+			trimmed := strings.TrimPrefix(rawURL, "ssh://git@")
+			return "https://" + trimmed
+		}
+		if strings.HasPrefix(rawURL, "git@") {
+			trimmed := strings.TrimPrefix(rawURL, "git@")
+			trimmed = strings.Replace(trimmed, ":", "/", 1)
+			return "https://" + trimmed
+		}
+	}
+
+	return rawURL
 }
