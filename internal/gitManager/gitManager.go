@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
+	"github.com/xheize/git-updater/internal/tracker"
 	"github.com/xheize/git-updater/internal/yaml"
 )
 
@@ -27,12 +28,12 @@ const (
 type GitAuthType string
 
 type gitManager struct {
-	repoURL    string
-	repo       *git.Repository
-	jobQueue   chan Job
-	workspace  string
-	autoUpdate bool
-	authOpts   []client.Option
+	repoURL   string
+	repo      *git.Repository
+	jobQueue  chan Job
+	workspace string
+	tracker   *tracker.Tracker
+	authOpts  []client.Option
 }
 
 type Job struct {
@@ -43,7 +44,7 @@ type Job struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func New(_repoURL string, _jobQueue chan Job) *gitManager {
+func New(_repoURL string, _jobQueue chan Job, t *tracker.Tracker) *gitManager {
 	var repoUrl string
 
 	if _repoURL == "" {
@@ -53,12 +54,6 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	workspace := "./workspace"
 	fmt.Printf("repoUrl: %s\n", repoUrl)
 	fmt.Printf("workspace: %s\n", workspace)
-
-	autoUpdate := false
-	if os.Getenv("AUTO_UPDATE") == "true" {
-		autoUpdate = true
-	}
-	fmt.Printf("Auto Update set: %v\n", autoUpdate)
 
 	gitAuthOptions, err := getGitAuth()
 	if err != nil {
@@ -70,12 +65,12 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	if err == nil {
 		fmt.Printf("Workspace exists. Opened existing repository.\n")
 		manager := &gitManager{
-			repoURL:    repoUrl,
-			repo:       gitRepo,
-			jobQueue:   _jobQueue,
-			workspace:  workspace,
-			autoUpdate: autoUpdate,
-			authOpts:   gitAuthOptions,
+			repoURL:   repoUrl,
+			repo:      gitRepo,
+			jobQueue:  _jobQueue,
+			workspace: workspace,
+			tracker:   t,
+			authOpts:  gitAuthOptions,
 		}
 		syncErr := manager.syncRepository()
 		if syncErr == nil {
@@ -104,12 +99,12 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	fmt.Printf("Repo Clone success!\n")
 
 	return &gitManager{
-		repoURL:    repoUrl,
-		repo:       gitRepo,
-		jobQueue:   _jobQueue,
-		workspace:  workspace,
-		autoUpdate: autoUpdate,
-		authOpts:   gitAuthOptions,
+		repoURL:   repoUrl,
+		repo:      gitRepo,
+		jobQueue:  _jobQueue,
+		workspace: workspace,
+		tracker:   t,
+		authOpts:  gitAuthOptions,
 	}
 }
 
@@ -205,8 +200,10 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 		for {
 			select {
 			case job := <-g.jobQueue:
-				if g.autoUpdate {
+				if g.tracker.IsAutoUpdate() {
 					g.Work(job)
+				} else {
+					g.tracker.AddJob(job.ID, job.File, job.Image, job.Tag, tracker.StatusPending)
 				}
 			case <-ctx.Done():
 				log.Printf("waiting for %d jobs to complete", len(g.jobQueue))
@@ -221,9 +218,13 @@ func (g *gitManager) StartWorker(ctx context.Context) {
 }
 
 func (g *gitManager) Work(job Job) bool {
+	g.tracker.AddJob(job.ID, job.File, job.Image, job.Tag, tracker.StatusRunning)
+
 	// Sync workspace with remote branch before reading
 	if err := g.syncRepository(); err != nil {
-		fmt.Printf("Failed to sync repository before work: %v\n", err)
+		errMsg := fmt.Sprintf("Failed to sync repository before work: %v", err)
+		fmt.Println(errMsg)
+		g.tracker.UpdateJobStatus(job.ID, tracker.StatusFailed, errMsg)
 		return false
 	}
 
@@ -231,35 +232,50 @@ func (g *gitManager) Work(job Job) bool {
 	filePath := filepath.Join(g.workspace, job.File)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		var errMsg string
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Printf("File %s does not exist\n", filePath)
+			errMsg = fmt.Sprintf("File %s does not exist", filePath)
 		} else {
-			fmt.Printf("File %s cannot be read: %v\n", filePath, err)
+			errMsg = fmt.Sprintf("File %s cannot be read: %v", filePath, err)
 		}
+		fmt.Println(errMsg)
+		g.tracker.UpdateJobStatus(job.ID, tracker.StatusFailed, errMsg)
 		return false
 	}
 
+	imageWithTag := job.Image
+	if job.Tag != "" {
+		imageWithTag = job.Image + ":" + job.Tag
+	}
+
 	update := map[string]string{
-		"spec.template.spec.containers[0].image": job.Image,
+		"spec.template.spec.containers[0].image": imageWithTag,
 	}
 
 	updatedData, err := yaml.ProcessYAMLUpdates(data, update)
 	if err != nil {
-		fmt.Printf("Update failed for file %s: %v\n", filePath, err)
+		errMsg := fmt.Sprintf("Update failed for file %s: %v", filePath, err)
+		fmt.Println(errMsg)
+		g.tracker.UpdateJobStatus(job.ID, tracker.StatusFailed, errMsg)
 		return false
 	}
 
 	if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
-		fmt.Printf("Failed to write file %s: %v\n", filePath, err)
+		errMsg := fmt.Sprintf("Failed to write file %s: %v", filePath, err)
+		fmt.Println(errMsg)
+		g.tracker.UpdateJobStatus(job.ID, tracker.StatusFailed, errMsg)
 		return false
 	}
 
 	commitMessage := fmt.Sprintf("Update image %s:%s", job.Image, job.Tag)
 
 	if !g.addCommitPush(job.File, commitMessage) {
+		errMsg := "Git push failed"
+		g.tracker.UpdateJobStatus(job.ID, tracker.StatusFailed, errMsg)
 		return false
 	}
 
+	g.tracker.UpdateJobStatus(job.ID, tracker.StatusSuccess, "")
 	return true
 }
 
