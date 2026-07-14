@@ -14,7 +14,7 @@ steps:
       - go vet ./...
     when:
       event: [push, pull_request, manual]
-      branch: dev
+      branch: main
       
   # Step 2: Build and Push Docker image using BuildKit
   - name: build-and-push-nightly
