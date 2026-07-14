@@ -50,7 +50,11 @@ func main() {
 		port = "3000"
 	}
 
-	app.Use(logger.New())
+	app.Use(logger.New(logger.Config{
+		Next: func(c *fiber.Ctx) bool {
+			return c.Path() == "/health"
+		},
+	}))
 	app.Use(recover.New())
 
 	app.Get("/health", func(c *fiber.Ctx) error {
