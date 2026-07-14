@@ -16,7 +16,7 @@ import (
 
 func main() {
 	serverFlag := flag.String("server", "", "Git Updater Server URL (can also be set via GIT_UPDATER_SERVER_URL env, defaults to http://localhost:3000)")
-	fileFlag := flag.String("file", "", "Target YAML file path to update (required)")
+	fileFlag := flag.String("file", "", "Target YAML file path to update (optional, scans workspace if omitted)")
 	imageFlag := flag.String("image", "", "Container image name (required)")
 	tagFlag := flag.String("tag", "", "Container image tag (required)")
 	keyFlag := flag.String("key", "", "API key for server authentication (can also be set via GIT_UPDATER_API_KEY env)")
@@ -44,12 +44,6 @@ func main() {
 		serverURL = "http://" + serverURL
 	}
 
-	if *fileFlag == "" {
-		fmt.Fprintln(os.Stderr, "Error: -file parameter is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	if *imageFlag == "" {
 		fmt.Fprintln(os.Stderr, "Error: -image parameter is required")
 		flag.Usage()
@@ -69,6 +63,7 @@ func main() {
 		Image:     *imageFlag,
 		Tag:       *tagFlag,
 		Timestamp: time.Now(),
+		Force:     true, // CLI is a force trigger
 	}
 
 	payloadBytes, err := json.Marshal(job)
