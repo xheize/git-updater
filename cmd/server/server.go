@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -61,88 +59,7 @@ func main() {
 		return c.JSON(fiber.Map{"status": "healthy"})
 	})
 
-	auth := authMiddleware(apiKey)
-
-	app.Post("/webhook", auth, func(c *fiber.Ctx) error {
-		var job gitManager.Job
-		if err := c.BodyParser(&job); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "failed to parse request body: " + err.Error(),
-			})
-		}
-
-		if job.Image == "" || job.Tag == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "parameters 'image' and 'tag' are required",
-			})
-		}
-
-		if job.ID == "" {
-			job.ID = fmt.Sprintf("webhook-%d", time.Now().UnixNano())
-		}
-		if job.Timestamp.IsZero() {
-			job.Timestamp = time.Now()
-		}
-
-		// Enqueue the job
-		select {
-		case jobQueue <- job:
-		default:
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "job queue for repository is full, try again later",
-			})
-		}
-
-		targetMsg := job.File
-		if targetMsg == "" {
-			targetMsg = job.Image
-		}
-		return c.JSON(fiber.Map{
-			"status":  "success",
-			"message": "successfully queued update for " + targetMsg,
-		})
-	})
-
-	app.Post("/api/update", auth, func(c *fiber.Ctx) error {
-		var job gitManager.Job
-		if err := c.BodyParser(&job); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "failed to parse request body: " + err.Error(),
-			})
-		}
-
-		if job.Image == "" || job.Tag == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "parameters 'image' and 'tag' are required",
-			})
-		}
-
-		if job.ID == "" {
-			job.ID = fmt.Sprintf("api-%d", time.Now().UnixNano())
-		}
-		if job.Timestamp.IsZero() {
-			job.Timestamp = time.Now()
-		}
-
-		// Enqueue the job
-		select {
-		case jobQueue <- job:
-		default:
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "job queue for repository is full, try again later",
-			})
-		}
-
-		targetMsg := job.File
-		if targetMsg == "" {
-			targetMsg = job.Image
-		}
-		return c.JSON(fiber.Map{
-			"status":  "success",
-			"message": "successfully queued update for " + targetMsg,
-			"jobId":   job.ID,
-		})
-	})
+	setupRoutes(app, jobQueue)
 
 	// Create context that listens for the interrupt signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -172,27 +89,4 @@ func main() {
 	log.Println("Server shutdown complete.")
 }
 
-func authMiddleware(apiKey string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if apiKey == "" {
-			return c.Next()
-		}
 
-		authHeader := c.Get("Authorization")
-		token := ""
-		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-			token = authHeader[7:]
-		}
-
-		if token == "" {
-			token = c.Get("X-API-Key")
-		}
-
-		if token != apiKey {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "unauthorized: invalid or missing API key",
-			})
-		}
-		return c.Next()
-	}
-}
