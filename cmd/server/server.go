@@ -67,6 +67,19 @@ func main() {
 			})
 		}
 
+		if job.Image == "" || job.Tag == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "parameters 'image' and 'tag' are required",
+			})
+		}
+
+		if job.ID == "" {
+			job.ID = fmt.Sprintf("webhook-%d", time.Now().UnixNano())
+		}
+		if job.Timestamp.IsZero() {
+			job.Timestamp = time.Now()
+		}
+
 		// Enqueue the job
 		select {
 		case jobQueue <- job:
