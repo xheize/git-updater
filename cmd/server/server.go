@@ -76,9 +76,13 @@ func main() {
 			})
 		}
 
+		targetMsg := job.File
+		if targetMsg == "" {
+			targetMsg = job.Image
+		}
 		return c.JSON(fiber.Map{
 			"status":  "success",
-			"message": "successfully updated " + job.File,
+			"message": "successfully queued update for " + targetMsg,
 		})
 	})
 
@@ -90,9 +94,9 @@ func main() {
 			})
 		}
 
-		if job.File == "" || job.Image == "" || job.Tag == "" {
+		if job.Image == "" || job.Tag == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "parameters 'file', 'image', and 'tag' are required",
+				"error": "parameters 'image' and 'tag' are required",
 			})
 		}
 
@@ -112,9 +116,13 @@ func main() {
 			})
 		}
 
+		targetMsg := job.File
+		if targetMsg == "" {
+			targetMsg = job.Image
+		}
 		return c.JSON(fiber.Map{
 			"status":  "success",
-			"message": "successfully queued update for " + job.File,
+			"message": "successfully queued update for " + targetMsg,
 			"jobId":   job.ID,
 		})
 	})

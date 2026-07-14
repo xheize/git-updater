@@ -112,3 +112,87 @@ func UpdateNode(node *yaml.Node, parts []PathPart, newValue string) bool {
 	}
 	return false
 }
+
+// IsArgoCDApplication returns true if the document is an ArgoCD Application resource
+func IsArgoCDApplication(node *yaml.Node) bool {
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		return IsArgoCDApplication(node.Content[0])
+	}
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	var isApp, isArgoProj bool
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		val := node.Content[i+1].Value
+		if key == "kind" && val == "Application" {
+			isApp = true
+		}
+		if key == "apiVersion" && strings.HasPrefix(val, "argoproj.io/") {
+			isArgoProj = true
+		}
+	}
+	return isApp && isArgoProj
+}
+
+// ProcessYAMLImageUpdate searches for the targetImage inside the YAML document and updates its tag to newTag
+func ProcessYAMLImageUpdate(yamlData []byte, targetImage string, newTag string) ([]byte, bool, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(yamlData))
+	var documents []*yaml.Node
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		documents = append(documents, &doc)
+	}
+
+	updated := false
+	for _, doc := range documents {
+		if UpdateImageInNode(doc, targetImage, newTag) {
+			updated = true
+		}
+	}
+
+	if !updated {
+		return yamlData, false, nil
+	}
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	for _, doc := range documents {
+		if err := enc.Encode(doc); err != nil {
+			return nil, false, err
+		}
+	}
+	return buf.Bytes(), true, nil
+}
+
+// UpdateImageInNode traverses the yaml.Node to find any image field matching targetImage and updates the tag
+func UpdateImageInNode(node *yaml.Node, targetImage string, newTag string) bool {
+	updated := false
+	if node.Kind == yaml.ScalarNode {
+		val := node.Value
+		if val == targetImage {
+			node.Value = targetImage + ":" + newTag
+			return true
+		}
+		if strings.HasPrefix(val, targetImage+":") {
+			node.Value = targetImage + ":" + newTag
+			return true
+		}
+		return false
+	}
+
+	for _, child := range node.Content {
+		if UpdateImageInNode(child, targetImage, newTag) {
+			updated = true
+		}
+	}
+	return updated
+}

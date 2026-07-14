@@ -64,3 +64,46 @@ func TestNormalizeGitURL(t *testing.T) {
 		})
 	}
 }
+
+func TestGetBaseImageName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Standard registry with tag",
+			input:    "registry.xheize.cc/app/nginx:1.20",
+			expected: "registry.xheize.cc/app/nginx",
+		},
+		{
+			name:     "Registry with port and tag",
+			input:    "registry.xheize.cc:5000/app/nginx:1.20",
+			expected: "registry.xheize.cc:5000/app/nginx",
+		},
+		{
+			name:     "Registry with port, no tag",
+			input:    "registry.xheize.cc:5000/app/nginx",
+			expected: "registry.xheize.cc:5000/app/nginx",
+		},
+		{
+			name:     "Simple image with tag",
+			input:    "nginx:latest",
+			expected: "nginx",
+		},
+		{
+			name:     "Simple image, no tag",
+			input:    "nginx",
+			expected: "nginx",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := getBaseImageName(tt.input)
+			if actual != tt.expected {
+				t.Errorf("getBaseImageName(%q) = %q; expected %q", tt.input, actual, tt.expected)
+			}
+		})
+	}
+}

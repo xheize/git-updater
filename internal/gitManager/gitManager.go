@@ -1,22 +1,25 @@
 package gitManager
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"gopkg.in/yaml.v3"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
-	"github.com/xheize/git-updater/internal/yaml"
+	internalYaml "github.com/xheize/git-updater/internal/yaml"
 )
 
 const (
@@ -27,12 +30,14 @@ const (
 type GitAuthType string
 
 type gitManager struct {
-	repoURL    string
-	repo       *git.Repository
-	jobQueue   chan Job
-	workspace  string
-	autoUpdate bool
-	authOpts   []client.Option
+	repoURL      string
+	repo         *git.Repository
+	jobQueue     chan Job
+	workspace    string
+	autoUpdate   bool
+	authOpts     []client.Option
+	imageToFiles map[string][]string
+	mu           sync.Mutex
 }
 
 type Job struct {
@@ -41,6 +46,7 @@ type Job struct {
 	Image     string    `json:"image"`
 	Tag       string    `json:"tag"`
 	Timestamp time.Time `json:"timestamp"`
+	Force     bool      `json:"force"`
 }
 
 func New(_repoURL string, _jobQueue chan Job) *gitManager {
@@ -71,16 +77,20 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	if err == nil {
 		log.Printf("Workspace exists. Opened existing repository.\n")
 		manager := &gitManager{
-			repoURL:    repoUrl,
-			repo:       gitRepo,
-			jobQueue:   _jobQueue,
-			workspace:  workspace,
-			autoUpdate: autoUpdate,
-			authOpts:   gitAuthOptions,
+			repoURL:      repoUrl,
+			repo:         gitRepo,
+			jobQueue:     _jobQueue,
+			workspace:    workspace,
+			autoUpdate:   autoUpdate,
+			authOpts:     gitAuthOptions,
+			imageToFiles: make(map[string][]string),
 		}
 		syncErr := manager.syncRepository()
 		if syncErr == nil {
 			log.Printf("Initial repository sync success!\n")
+			if err := manager.buildImageMapping(); err != nil {
+				log.Printf("Failed to build image mapping: %v\n", err)
+			}
 			return manager
 		}
 		log.Printf("Initial sync failed: %v. Re-creating workspace.\n", syncErr)
@@ -104,14 +114,19 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 	}
 	log.Printf("Repo Clone success!\n")
 
-	return &gitManager{
-		repoURL:    repoUrl,
-		repo:       gitRepo,
-		jobQueue:   _jobQueue,
-		workspace:  workspace,
-		autoUpdate: autoUpdate,
-		authOpts:   gitAuthOptions,
+	manager := &gitManager{
+		repoURL:      repoUrl,
+		repo:         gitRepo,
+		jobQueue:     _jobQueue,
+		workspace:    workspace,
+		autoUpdate:   autoUpdate,
+		authOpts:     gitAuthOptions,
+		imageToFiles: make(map[string][]string),
 	}
+	if err := manager.buildImageMapping(); err != nil {
+		log.Printf("Failed to build image mapping: %v\n", err)
+	}
+	return manager
 }
 
 func getGitAuth() ([]client.Option, error) {
@@ -224,8 +239,10 @@ func (g *gitManager) StartWorker() <-chan struct{} {
 				log.Println("Job queue closed. Git worker stopping...")
 				return
 			}
-			if g.autoUpdate {
+			if g.autoUpdate || job.Force {
 				g.Work(job)
+			} else {
+				log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
 			}
 		}
 	}()
@@ -239,52 +256,79 @@ func (g *gitManager) Work(job Job) bool {
 		return false
 	}
 
-	// Read job file from the workspace path
-	filePath := filepath.Join(g.workspace, job.File)
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("File %s does not exist\n", filePath)
-		} else {
-			log.Printf("File %s cannot be read: %v\n", filePath, err)
+	var filesToUpdate []string
+	baseImage := getBaseImageName(job.Image)
+
+	if job.File != "" {
+		filesToUpdate = []string{job.File}
+	} else {
+		g.mu.Lock()
+		filesToUpdate = g.imageToFiles[baseImage]
+		g.mu.Unlock()
+		if len(filesToUpdate) == 0 {
+			log.Printf("Job %s skipped: no files found in repository referencing image %s\n", job.ID, baseImage)
+			return true
 		}
+	}
+
+	var updatedFiles []string
+	for _, relPath := range filesToUpdate {
+		filePath := filepath.Join(g.workspace, relPath)
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Printf("File %s cannot be read: %v\n", filePath, err)
+			continue
+		}
+
+		updatedData, updated, err := internalYaml.ProcessYAMLImageUpdate(data, baseImage, job.Tag)
+		if err != nil {
+			log.Printf("Update failed for file %s: %v\n", filePath, err)
+			continue
+		}
+
+		if updated {
+			if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
+				log.Printf("Failed to write file %s: %v\n", filePath, err)
+				continue
+			}
+			updatedFiles = append(updatedFiles, relPath)
+		}
+	}
+
+	if len(updatedFiles) == 0 {
+		log.Printf("Job %s completed: no files were actually modified.\n", job.ID)
+		return true
+	}
+
+	commitMessage := fmt.Sprintf("Update image %s:%s in %d files", baseImage, job.Tag, len(updatedFiles))
+	if job.File != "" {
+		commitMessage = fmt.Sprintf("Update image %s:%s in %s", baseImage, job.Tag, job.File)
+	}
+
+	if !g.addCommitPush(updatedFiles, commitMessage) {
 		return false
 	}
 
-	update := map[string]string{
-		"spec.template.spec.containers[0].image": job.Image,
-	}
-
-	updatedData, err := yaml.ProcessYAMLUpdates(data, update)
-	if err != nil {
-		log.Printf("Update failed for file %s: %v\n", filePath, err)
-		return false
-	}
-
-	if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
-		log.Printf("Failed to write file %s: %v\n", filePath, err)
-		return false
-	}
-
-	commitMessage := fmt.Sprintf("Update image %s:%s", job.Image, job.Tag)
-
-	if !g.addCommitPush(job.File, commitMessage) {
-		return false
+	// Rebuild in-memory mapping after push
+	if err := g.buildImageMapping(); err != nil {
+		log.Printf("Failed to rebuild image mapping after update: %v\n", err)
 	}
 
 	return true
 }
 
-func (g *gitManager) addCommitPush(file string, commitMessage string) bool {
+func (g *gitManager) addCommitPush(files []string, commitMessage string) bool {
 	w, err := g.repo.Worktree()
 	if err != nil {
 		log.Printf("Failed to get worktree: %v\n", err)
 		return false
 	}
 
-	if _, err := w.Add(file); err != nil {
-		log.Printf("Git add failed for %s: %v\n", file, err)
-		return false
+	for _, file := range files {
+		if _, err := w.Add(file); err != nil {
+			log.Printf("Git add failed for %s: %v\n", file, err)
+			return false
+		}
 	}
 
 	_, err = w.Commit(commitMessage, &git.CommitOptions{})
@@ -300,6 +344,123 @@ func (g *gitManager) addCommitPush(file string, commitMessage string) bool {
 		return false
 	}
 	return true
+}
+
+func (g *gitManager) buildImageMapping() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	newMap := make(map[string][]string)
+
+	err := filepath.Walk(g.workspace, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".yaml" || ext == ".yml" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil // Skip unreadable files
+			}
+
+			dec := yaml.NewDecoder(bytes.NewReader(data))
+			for {
+				var doc yaml.Node
+				err := dec.Decode(&doc)
+				if err != nil {
+					break // EOF or parse error
+				}
+
+				// Check if it's an ArgoCD Application
+				if internalYaml.IsArgoCDApplication(&doc) {
+					log.Printf("Skipping ArgoCD Application file: %s\n", path)
+					continue
+				}
+
+				// Extract container images
+				images := extractImagesFromNode(&doc)
+				relPath, err := filepath.Rel(g.workspace, path)
+				if err == nil {
+					for _, img := range images {
+						baseImg := getBaseImageName(img)
+						if baseImg != "" {
+							newMap[baseImg] = appendUnique(newMap[baseImg], relPath)
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	g.imageToFiles = newMap
+	log.Printf("Built in-memory image mapping: %d unique images mapped\n", len(g.imageToFiles))
+	for img, files := range g.imageToFiles {
+		log.Printf("  Image: %s -> Files: %v\n", img, files)
+	}
+	return nil
+}
+
+func extractImagesFromNode(node *yaml.Node) []string {
+	var images []string
+	if node.Kind == yaml.DocumentNode {
+		for _, child := range node.Content {
+			images = append(images, extractImagesFromNode(child)...)
+		}
+		return images
+	}
+
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i].Value
+			valNode := node.Content[i+1]
+			if key == "image" && valNode.Kind == yaml.ScalarNode {
+				images = append(images, valNode.Value)
+			} else {
+				images = append(images, extractImagesFromNode(valNode)...)
+			}
+		}
+	}
+
+	if node.Kind == yaml.SequenceNode {
+		for _, child := range node.Content {
+			images = append(images, extractImagesFromNode(child)...)
+		}
+	}
+
+	return images
+}
+
+func getBaseImageName(imageStr string) string {
+	idx := strings.LastIndex(imageStr, ":")
+	if idx == -1 {
+		return imageStr
+	}
+	suffix := imageStr[idx+1:]
+	if strings.Contains(suffix, "/") {
+		return imageStr
+	}
+	return imageStr[:idx]
+}
+
+func appendUnique(slice []string, val string) []string {
+	for _, item := range slice {
+		if item == val {
+			return slice
+		}
+	}
+	return append(slice, val)
 }
 
 func normalizeGitURL(rawURL string, authMethod string) string {
