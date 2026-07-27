@@ -1,6 +1,8 @@
 package gitManager
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -105,5 +107,66 @@ func TestGetBaseImageName(t *testing.T) {
 				t.Errorf("getBaseImageName(%q) = %q; expected %q", tt.input, actual, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveWorkspaceFile(t *testing.T) {
+	workspace := t.TempDir()
+	validFile := filepath.Join(workspace, "deployments", "web.yaml")
+	if err := os.MkdirAll(filepath.Dir(validFile), 0755); err != nil {
+		t.Fatalf("create test directory: %v", err)
+	}
+	if err := os.WriteFile(validFile, []byte("image: nginx:1.0"), 0644); err != nil {
+		t.Fatalf("create test file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "valid relative YAML path", path: filepath.Join("deployments", "web.yaml")},
+		{name: "parent directory traversal", path: filepath.Join("..", "outside.yaml"), wantErr: true},
+		{name: "absolute path", path: validFile, wantErr: true},
+		{name: "non-YAML extension", path: "deployments/web.txt", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotRelativePath, err := resolveWorkspaceFile(workspace, tt.path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveWorkspaceFile returned an error: %v", err)
+			}
+			if gotPath != validFile {
+				t.Errorf("file path = %q, expected %q", gotPath, validFile)
+			}
+			if gotRelativePath != filepath.Join("deployments", "web.yaml") {
+				t.Errorf("relative path = %q", gotRelativePath)
+			}
+		})
+	}
+}
+
+func TestResolveWorkspaceFileRejectsSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	outsideFile := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outsideFile, []byte("image: nginx:1.0"), 0644); err != nil {
+		t.Fatalf("create outside file: %v", err)
+	}
+
+	linkPath := filepath.Join(workspace, "linked.yaml")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Skipf("symbolic links are unavailable in this environment: %v", err)
+	}
+
+	_, _, err := resolveWorkspaceFile(workspace, "linked.yaml")
+	if err == nil {
+		t.Fatal("expected symbolic link to be rejected")
 	}
 }
