@@ -17,6 +17,21 @@ import (
 func main() {
 
 	jobQueue := make(chan gitManager.Job, 100)
+	jobDatabasePath := os.Getenv("JOB_DB_PATH")
+	if jobDatabasePath == "" {
+		jobDatabasePath = "./data/jobs.db"
+	}
+	jobStore, err := gitManager.NewSQLiteJobStore(jobDatabasePath)
+	if err != nil {
+		log.Fatalf("Failed to initialize job store: %v", err)
+	}
+	defer jobStore.Close()
+	if recovered, err := jobStore.RecoverInterruptedJobs(); err != nil {
+		log.Fatalf("Failed to recover interrupted jobs: %v", err)
+	} else if recovered > 0 {
+		log.Printf("Recovered %d interrupted jobs", recovered)
+	}
+
 	repoURL := os.Getenv("GIT_REPOSITORY_URL")
 	if repoURL == "" {
 		repoURL = os.Getenv("GIT_REPO_URL")
@@ -25,7 +40,7 @@ func main() {
 		log.Fatalf("Failed to get git repo url. check env setting")
 	}
 
-	gitMgr := gitManager.New(repoURL, jobQueue)
+	gitMgr := gitManager.New(repoURL, jobQueue, jobStore)
 	if gitMgr == nil {
 		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
 	}
@@ -59,7 +74,7 @@ func main() {
 		return c.JSON(fiber.Map{"status": "healthy"})
 	})
 
-	setupRoutes(app, jobQueue)
+	setupRoutes(app, jobQueue, jobStore)
 
 	// Create context that listens for the interrupt signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -88,5 +103,3 @@ func main() {
 	<-workerDone
 	log.Println("Server shutdown complete.")
 }
-
-

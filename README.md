@@ -33,6 +33,7 @@
 | `GIT_USERNAME` | `http` 시 필수 | HTTP Basic 인증용 Username |
 | `GIT_PASSWORD` | `http` 시 필수 | HTTP Basic 인증용 Password 또는 Personal Access Token |
 | `GIT_REPOSITORY_URL` | **필수** | 업데이트 대상 Git 저장소 주소 (`GIT_REPO_URL`도 호환 지원) |
+| `JOB_DB_PATH` | 선택 | 영속 작업 큐 SQLite DB 경로 (기본값: `./data/jobs.db`) |
 | `PORT` | 선택 | API 서버가 리스닝할 포트 (기본값: `3000`) |
 
 ---
@@ -61,6 +62,7 @@ docker build -t git-updater:latest .
 # 컨테이너 실행
 docker run -d \
   -p 3000:3000 \
+	  -v git-updater-data:/app/data \
   -e GIT_AUTH_METHOD="http" \
   -e GIT_USERNAME="username" \
   -e GIT_PASSWORD="token" \

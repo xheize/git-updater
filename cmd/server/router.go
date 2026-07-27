@@ -16,7 +16,7 @@ import (
 )
 
 // setupRoutes registers all route handlers grouped by API and Webhooks
-func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job) {
+func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) {
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("WEBHOOK_SECRET")
@@ -32,29 +32,29 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job) {
 
 	// Standard webhook (API key authenticated, used by CLI)
 	webhooks.Post("", auth, func(c *fiber.Ctx) error {
-		return handleJobEnqueue(c, jobQueue, "webhook")
+		return handleJobEnqueue(c, jobQueue, jobStore, "webhook")
 	})
 
 	// GitHub webhook (GitHub signature verified, GITHUB_WEBHOOK_SECRET key check)
 	githubAuth := githubSignatureMiddleware(githubSecret)
 	webhooks.Post("/github", githubAuth, func(c *fiber.Ctx) error {
-		return handleJobEnqueue(c, jobQueue, "github-webhook")
+		return handleJobEnqueue(c, jobQueue, jobStore, "github-webhook")
 	})
 
 	// Zot webhook (API key authenticated, parses Zot events extension JSON format)
 	webhooks.Post("/zot", auth, func(c *fiber.Ctx) error {
-		return handleZotWebhook(c, jobQueue)
+		return handleZotWebhook(c, jobQueue, jobStore)
 	})
 
 	// API Group
 	api := app.Group("/api")
 	api.Post("/update", auth, func(c *fiber.Ctx) error {
-		return handleJobEnqueue(c, jobQueue, "api")
+		return handleJobEnqueue(c, jobQueue, jobStore, "api")
 	})
 }
 
 // handleJobEnqueue validates the request body, sets default ID/Timestamp, and enqueues the job
-func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, source string) error {
+func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, source string) error {
 	var job gitManager.Job
 	if err := c.BodyParser(&job); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -75,12 +75,17 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, source string)
 		job.Timestamp = time.Now()
 	}
 
+	if err := jobStore.Enqueue(job); err != nil {
+		log.Printf("Failed to persist job %s: %v", job.ID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to persist update job",
+		})
+	}
+
 	select {
 	case jobQueue <- job:
 	default:
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"error": "job queue for repository is full, try again later",
-		})
+		// The worker will claim this persisted job after its current work.
 	}
 
 	targetMsg := job.File
@@ -88,9 +93,9 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, source string)
 		targetMsg = job.Image
 	}
 
-	return c.JSON(fiber.Map{
-		"status":  "success",
-		"message": "successfully queued update for " + targetMsg,
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"status":  "accepted",
+		"message": "persisted update job for " + targetMsg,
 		"jobId":   job.ID,
 	})
 }
@@ -177,7 +182,7 @@ type ZotWebhookPayload struct {
 }
 
 // handleZotWebhook validates Zot push notification, maps it into Job, and enqueues it
-func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job) error {
+func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
 	var payload ZotWebhookPayload
 	if err := c.BodyParser(&payload); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -219,17 +224,22 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job) error {
 		job.Timestamp = time.Now()
 	}
 
-	select {
-	case jobQueue <- job:
-	default:
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"error": "job queue for repository is full, try again later",
+	if err := jobStore.Enqueue(job); err != nil {
+		log.Printf("Failed to persist Zot job %s: %v", job.ID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to persist update job",
 		})
 	}
 
-	return c.JSON(fiber.Map{
-		"status":  "success",
-		"message": "successfully queued update for " + image,
+	select {
+	case jobQueue <- job:
+	default:
+		// The worker will claim this persisted job after its current work.
+	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"status":  "accepted",
+		"message": "persisted update job for " + image,
 		"jobId":   job.ID,
 	})
 }
