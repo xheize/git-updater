@@ -34,14 +34,17 @@ WORKDIR /app
 COPY --from=builder /app/git-updater .
 COPY --from=builder /app/git-updater-cli .
 
-# Create workspace directory and grant ownership to the non-root user
-RUN mkdir -p /app/workspace && chown -R appuser:appgroup /app
+# Create workspace and durable job-store directories for the non-root user
+RUN mkdir -p /app/workspace /app/data && chown -R appuser:appgroup /app
 
 # Run as non-root user
 USER appuser
 
 # Expose port
 EXPOSE 3000
+
+# Mount this path to retain queued jobs across container replacement.
+VOLUME ["/app/data"]
 
 # Set environment variables
 ENV PORT=3000

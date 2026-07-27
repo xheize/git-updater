@@ -36,6 +36,7 @@ type gitManager struct {
 	workspace    string
 	autoUpdate   bool
 	authOpts     []client.Option
+	jobStore     *JobStore
 	imageToFiles map[string][]string
 	mu           sync.Mutex
 }
@@ -49,10 +50,10 @@ type Job struct {
 	Force     bool      `json:"force"`
 }
 
-func New(_repoURL string, _jobQueue chan Job) *gitManager {
+func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 	var repoUrl string
 
-	if _repoURL == "" {
+	if _repoURL == "" || jobStore == nil {
 		return nil
 	}
 	gitAuthMethod := os.Getenv("GIT_AUTH_METHOD")
@@ -83,6 +84,7 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 			workspace:    workspace,
 			autoUpdate:   autoUpdate,
 			authOpts:     gitAuthOptions,
+			jobStore:     jobStore,
 			imageToFiles: make(map[string][]string),
 		}
 		syncErr := manager.syncRepository()
@@ -121,6 +123,7 @@ func New(_repoURL string, _jobQueue chan Job) *gitManager {
 		workspace:    workspace,
 		autoUpdate:   autoUpdate,
 		authOpts:     gitAuthOptions,
+		jobStore:     jobStore,
 		imageToFiles: make(map[string][]string),
 	}
 	if err := manager.buildImageMapping(); err != nil {
@@ -234,19 +237,52 @@ func (g *gitManager) StartWorker() <-chan struct{} {
 	go func() {
 		defer close(done)
 		for {
+			job, claimed, err := g.jobStore.ClaimNext()
+			if err != nil {
+				log.Printf("Failed to claim pending job: %v\n", err)
+			}
+			if claimed {
+				g.processClaimedJob(job)
+				continue
+			}
+
 			job, ok := <-g.jobQueue
 			if !ok {
 				log.Println("Job queue closed. Git worker stopping...")
 				return
 			}
-			if g.autoUpdate || job.Force {
-				g.Work(job)
-			} else {
-				log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
+
+			claimedJob, claimed, err := g.jobStore.Claim(job.ID)
+			if err != nil {
+				log.Printf("Failed to claim job %s: %v\n", job.ID, err)
+				continue
+			}
+			if claimed {
+				g.processClaimedJob(claimedJob)
 			}
 		}
 	}()
 	return done
+}
+
+func (g *gitManager) processClaimedJob(job Job) {
+	if !g.autoUpdate && !job.Force {
+		log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
+		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+			log.Printf("Failed to mark skipped job %s as completed: %v\n", job.ID, err)
+		}
+		return
+	}
+
+	if g.Work(job) {
+		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+			log.Printf("Failed to mark job %s as completed: %v\n", job.ID, err)
+		}
+		return
+	}
+	if err := g.jobStore.MarkFailed(job.ID, "Git update failed; inspect server logs for details"); err != nil {
+		log.Printf("Failed to mark job %s as failed: %v\n", job.ID, err)
+	}
 }
 
 func (g *gitManager) Work(job Job) bool {
