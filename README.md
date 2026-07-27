@@ -108,3 +108,14 @@ export GIT_UPDATER_SERVER_URL="https://git-updater.your-domain.com"
 ```bash
 go test -v ./...
 ```
+
+---
+
+## 작업 상태 및 재시도
+
+요청은 SQLite 작업 저장소에 영속화됩니다. Git 처리 실패 시 5초부터 지수 백오프로 재시도하며, 총 3회 시도 후 `failed` 상태로 남습니다.
+
+* `GET /api/jobs/{jobId}`: 작업 상태, 시도 횟수, 마지막 오류 및 다음 재시도 시각 조회
+* `POST /api/jobs/{jobId}/retry`: `failed` 작업을 수동으로 다시 큐에 등록
+
+GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.

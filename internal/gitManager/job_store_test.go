@@ -64,3 +64,50 @@ func TestJobStoreRecoversInterruptedJob(t *testing.T) {
 		t.Fatalf("unexpected pending job after completion: ok=%v err=%v", ok, err)
 	}
 }
+
+func TestJobStoreRetriesThenAllowsManualRetry(t *testing.T) {
+	store, err := NewSQLiteJobStore(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("create job store: %v", err)
+	}
+	defer store.Close()
+
+	job := Job{ID: "retry-job", Action: JobActionUpdate, Image: "nginx", Tag: "1.25", Timestamp: time.Now()}
+	if _, err := store.Enqueue(job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
+		claimed, ok, err := store.ClaimNext()
+		if err != nil || !ok {
+			t.Fatalf("claim attempt %d: ok=%v err=%v", attempt, ok, err)
+		}
+		if err := store.MarkFailed(claimed.ID, "temporary failure"); err != nil {
+			t.Fatalf("mark failure %d: %v", attempt, err)
+		}
+
+		info, found, err := store.Get(job.ID)
+		if err != nil || !found {
+			t.Fatalf("get failed job %d: found=%v err=%v", attempt, found, err)
+		}
+		if attempt < maxJobAttempts {
+			if info.Status != jobStatusRetrying || info.NextAttemptAt == nil {
+				t.Fatalf("job state after attempt %d = %#v", attempt, info)
+			}
+			if _, err := store.db.Exec("UPDATE jobs SET next_attempt_at_ns = 0 WHERE id = ?", job.ID); err != nil {
+				t.Fatalf("make retry ready: %v", err)
+			}
+		} else if info.Status != jobStatusFailed {
+			t.Fatalf("final job state = %q, expected %q", info.Status, jobStatusFailed)
+		}
+	}
+
+	retried, found, err := store.Retry(job.ID)
+	if err != nil || !found || retried.ID != job.ID {
+		t.Fatalf("manual retry: job=%#v found=%v err=%v", retried, found, err)
+	}
+	info, found, err := store.Get(job.ID)
+	if err != nil || !found || info.Status != jobStatusPending || info.Attempts != 0 {
+		t.Fatalf("job state after manual retry = %#v found=%v err=%v", info, found, err)
+	}
+}

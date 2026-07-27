@@ -240,6 +240,17 @@ func (g *gitManager) syncRepository() error {
 	return nil
 }
 
+func (g *gitManager) BranchName() (string, error) {
+	head, err := g.repo.Head()
+	if err != nil {
+		return "", fmt.Errorf("get current branch: %w", err)
+	}
+	if !head.Name().IsBranch() {
+		return "", errors.New("repository HEAD is detached")
+	}
+	return head.Name().Short(), nil
+}
+
 func (g *gitManager) StartWorker() <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -254,10 +265,15 @@ func (g *gitManager) StartWorker() <-chan struct{} {
 				continue
 			}
 
-			job, ok := <-g.jobQueue
-			if !ok {
-				log.Println("Job queue closed. Git worker stopping...")
-				return
+			var ok bool
+			select {
+			case job, ok = <-g.jobQueue:
+				if !ok {
+					log.Println("Job queue closed. Git worker stopping...")
+					return
+				}
+			case <-time.After(time.Second):
+				continue
 			}
 
 			claimedJob, claimed, err := g.jobStore.Claim(job.ID)
