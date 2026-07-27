@@ -273,7 +273,12 @@ func (g *gitManager) Work(job Job) bool {
 
 	var updatedFiles []string
 	for _, relPath := range filesToUpdate {
-		filePath := filepath.Join(g.workspace, relPath)
+		filePath, safeRelPath, err := resolveWorkspaceFile(g.workspace, relPath)
+		if err != nil {
+			log.Printf("Job %s skipped unsafe file path %q: %v\n", job.ID, relPath, err)
+			continue
+		}
+
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			log.Printf("File %s cannot be read: %v\n", filePath, err)
@@ -291,7 +296,7 @@ func (g *gitManager) Work(job Job) bool {
 				log.Printf("Failed to write file %s: %v\n", filePath, err)
 				continue
 			}
-			updatedFiles = append(updatedFiles, relPath)
+			updatedFiles = append(updatedFiles, safeRelPath)
 		}
 	}
 
@@ -315,6 +320,56 @@ func (g *gitManager) Work(job Job) bool {
 	}
 
 	return true
+}
+
+// resolveWorkspaceFile returns an existing YAML file only when every path
+// component is inside workspace and none of those components is a symlink.
+// The latter is important because a repository-controlled symlink can make a
+// lexically safe path resolve outside the workspace.
+func resolveWorkspaceFile(workspace, requestedPath string) (string, string, error) {
+	if requestedPath == "" {
+		return "", "", errors.New("file path is empty")
+	}
+	if filepath.IsAbs(requestedPath) || filepath.VolumeName(requestedPath) != "" {
+		return "", "", errors.New("absolute paths are not allowed")
+	}
+
+	cleanPath := filepath.Clean(requestedPath)
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", "", errors.New("path escapes the workspace")
+	}
+
+	ext := strings.ToLower(filepath.Ext(cleanPath))
+	if ext != ".yaml" && ext != ".yml" {
+		return "", "", errors.New("only YAML files can be updated")
+	}
+
+	workspacePath, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	filePath := filepath.Join(workspacePath, cleanPath)
+	relativePath, err := filepath.Rel(workspacePath, filePath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve relative file path: %w", err)
+	}
+	if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+		return "", "", errors.New("path escapes the workspace")
+	}
+
+	currentPath := workspacePath
+	for _, component := range strings.Split(cleanPath, string(filepath.Separator)) {
+		currentPath = filepath.Join(currentPath, component)
+		info, err := os.Lstat(currentPath)
+		if err != nil {
+			return "", "", fmt.Errorf("inspect file path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", "", errors.New("symbolic links are not allowed in file paths")
+		}
+	}
+
+	return filePath, relativePath, nil
 }
 
 func (g *gitManager) addCommitPush(files []string, commitMessage string) bool {
