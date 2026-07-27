@@ -23,7 +23,7 @@ func TestGitHubPushWebhookQueuesSyncJob(t *testing.T) {
 	queue := make(chan gitManager.Job, 1)
 	app := fiber.New()
 	app.Post("/webhook/github", githubSignatureMiddleware("test-secret"), func(c *fiber.Ctx) error {
-		return handleGitHubSyncWebhook(c, queue, store)
+		return handleGitHubSyncWebhook(c, queue, store, "main")
 	})
 
 	body := []byte(`{"ref":"refs/heads/main"}`)
@@ -57,5 +57,29 @@ func TestGitHubPushWebhookQueuesSyncJob(t *testing.T) {
 	}
 	if claimed.Action != gitManager.JobActionSync {
 		t.Errorf("persisted action = %q, expected %q", claimed.Action, gitManager.JobActionSync)
+	}
+
+	otherBranchBody := []byte(`{"ref":"refs/heads/release"}`)
+	mac = hmac.New(sha256.New, []byte("test-secret"))
+	mac.Write(otherBranchBody)
+	request = httptest.NewRequest("POST", "/webhook/github", bytes.NewReader(otherBranchBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Event", "push")
+	request.Header.Set("X-GitHub-Delivery", "delivery-2")
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response, err = app.Test(request)
+	if err != nil {
+		t.Fatalf("send other-branch webhook request: %v", err)
+	}
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("other-branch response status = %d, expected %d", response.StatusCode, fiber.StatusOK)
+	}
+	select {
+	case unexpected := <-queue:
+		t.Fatalf("unexpected queued job for other branch: %#v", unexpected)
+	default:
+	}
+	if _, found, err := store.Get("github-delivery-2"); err != nil || found {
+		t.Fatalf("other-branch job was persisted: found=%v err=%v", found, err)
 	}
 }

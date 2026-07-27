@@ -16,7 +16,7 @@ import (
 )
 
 // setupRoutes registers all route handlers grouped by API and Webhooks
-func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) {
+func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string) {
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("WEBHOOK_SECRET")
@@ -38,7 +38,7 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 	// GitHub webhook (GitHub signature verified, GITHUB_WEBHOOK_SECRET key check)
 	githubAuth := githubSignatureMiddleware(githubSecret)
 	webhooks.Post("/github", githubAuth, func(c *fiber.Ctx) error {
-		return handleGitHubSyncWebhook(c, jobQueue, jobStore)
+		return handleGitHubSyncWebhook(c, jobQueue, jobStore, targetBranch)
 	})
 
 	// Zot webhook (API key authenticated, parses Zot events extension JSON format)
@@ -50,6 +50,12 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 	api := app.Group("/api")
 	api.Post("/update", auth, func(c *fiber.Ctx) error {
 		return handleJobEnqueue(c, jobQueue, jobStore, "api")
+	})
+	api.Get("/jobs/:id", auth, func(c *fiber.Ctx) error {
+		return handleJobStatus(c, jobStore)
+	})
+	api.Post("/jobs/:id/retry", auth, func(c *fiber.Ctx) error {
+		return handleJobRetry(c, jobQueue, jobStore)
 	})
 }
 
@@ -107,7 +113,7 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 // handleGitHubSyncWebhook queues a workspace synchronization for a repository
 // push. GitHub events are not image-update requests and never accept image or
 // tag fields from the webhook body.
-func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
+func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string) error {
 	if c.Get("X-GitHub-Event") != "push" {
 		return c.JSON(fiber.Map{
 			"status":  "ignored",
@@ -126,6 +132,12 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 	if payload.Ref == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "GitHub push payload is missing ref",
+		})
+	}
+	if payload.Ref != "refs/heads/"+targetBranch {
+		return c.JSON(fiber.Map{
+			"status":  "ignored",
+			"message": "push ref does not match tracked branch " + targetBranch,
 		})
 	}
 
@@ -157,6 +169,37 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"status":  "accepted",
 		"message": "persisted workspace synchronization for " + payload.Ref,
+		"jobId":   job.ID,
+	})
+}
+
+func handleJobStatus(c *fiber.Ctx, jobStore *gitManager.JobStore) error {
+	info, found, err := jobStore.Get(c.Params("id"))
+	if err != nil {
+		log.Printf("Failed to read job %s: %v", c.Params("id"), err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read job status"})
+	}
+	if !found {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "job not found"})
+	}
+	return c.JSON(info)
+}
+
+func handleJobRetry(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
+	job, found, err := jobStore.Retry(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !found {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "job not found"})
+	}
+	select {
+	case jobQueue <- job:
+	default:
+	}
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"status":  "accepted",
+		"message": "job retry scheduled",
 		"jobId":   job.ID,
 	})
 }

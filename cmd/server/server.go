@@ -44,6 +44,10 @@ func main() {
 	if gitMgr == nil {
 		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
 	}
+	targetBranch, err := gitMgr.BranchName()
+	if err != nil {
+		log.Fatalf("Failed to determine repository branch: %v", err)
+	}
 	workerDone := gitMgr.StartWorker()
 
 	apiKey := os.Getenv("API_KEY")
@@ -74,7 +78,7 @@ func main() {
 		return c.JSON(fiber.Map{"status": "healthy"})
 	})
 
-	setupRoutes(app, jobQueue, jobStore)
+	setupRoutes(app, jobQueue, jobStore, targetBranch)
 
 	// Create context that listens for the interrupt signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
