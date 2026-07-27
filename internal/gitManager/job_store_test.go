@@ -15,13 +15,14 @@ func TestJobStoreRecoversInterruptedJob(t *testing.T) {
 
 	job := Job{
 		ID:        "job-1",
+		Action:    JobActionUpdate,
 		File:      "deployments/web.yaml",
 		Image:     "nginx",
 		Tag:       "1.25.4",
 		Timestamp: time.Now().UTC().Round(0),
 		Force:     true,
 	}
-	if err := store.Enqueue(job); err != nil {
+	if _, err := store.Enqueue(job); err != nil {
 		t.Fatalf("enqueue job: %v", err)
 	}
 	claimed, ok, err := store.ClaimNext()

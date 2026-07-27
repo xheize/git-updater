@@ -29,6 +29,13 @@ const (
 
 type GitAuthType string
 
+type JobAction string
+
+const (
+	JobActionUpdate JobAction = "update"
+	JobActionSync   JobAction = "sync"
+)
+
 type gitManager struct {
 	repoURL      string
 	repo         *git.Repository
@@ -43,6 +50,7 @@ type gitManager struct {
 
 type Job struct {
 	ID        string    `json:"id"`
+	Action    JobAction `json:"action"`
 	File      string    `json:"file"`
 	Image     string    `json:"image"`
 	Tag       string    `json:"tag"`
@@ -266,6 +274,26 @@ func (g *gitManager) StartWorker() <-chan struct{} {
 }
 
 func (g *gitManager) processClaimedJob(job Job) {
+	if job.Action == JobActionSync {
+		log.Printf("Synchronizing workspace for GitHub push job %s\n", job.ID)
+		if err := g.syncRepository(); err != nil {
+			g.markJobFailed(job.ID, fmt.Sprintf("workspace synchronization failed: %v", err))
+			return
+		}
+		if err := g.buildImageMapping(); err != nil {
+			g.markJobFailed(job.ID, fmt.Sprintf("rebuild image mapping after synchronization failed: %v", err))
+			return
+		}
+		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+			log.Printf("Failed to mark sync job %s as completed: %v\n", job.ID, err)
+		}
+		return
+	}
+	if job.Action != JobActionUpdate {
+		g.markJobFailed(job.ID, fmt.Sprintf("unsupported job action %q", job.Action))
+		return
+	}
+
 	if !g.autoUpdate && !job.Force {
 		log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
 		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
@@ -280,8 +308,12 @@ func (g *gitManager) processClaimedJob(job Job) {
 		}
 		return
 	}
-	if err := g.jobStore.MarkFailed(job.ID, "Git update failed; inspect server logs for details"); err != nil {
-		log.Printf("Failed to mark job %s as failed: %v\n", job.ID, err)
+	g.markJobFailed(job.ID, "Git update failed; inspect server logs for details")
+}
+
+func (g *gitManager) markJobFailed(id, failure string) {
+	if err := g.jobStore.MarkFailed(id, failure); err != nil {
+		log.Printf("Failed to mark job %s as failed: %v\n", id, err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -56,6 +57,7 @@ func (s *JobStore) initialize() error {
 		"PRAGMA busy_timeout = 5000",
 		`CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT PRIMARY KEY,
+			action TEXT NOT NULL DEFAULT 'update',
 			file TEXT NOT NULL,
 			image TEXT NOT NULL,
 			tag TEXT NOT NULL,
@@ -73,6 +75,40 @@ func (s *JobStore) initialize() error {
 			return fmt.Errorf("initialize job database: %w", err)
 		}
 	}
+	return s.ensureActionColumn()
+}
+
+func (s *JobStore) ensureActionColumn() error {
+	rows, err := s.db.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return fmt.Errorf("inspect job database schema: %w", err)
+	}
+
+	hasActionColumn := false
+	for rows.Next() {
+		var columnID, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&columnID, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("read job database schema: %w", err)
+		}
+		if name == "action" {
+			hasActionColumn = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate job database schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close job database schema inspection: %w", err)
+	}
+	if hasActionColumn {
+		return nil
+	}
+	if _, err := s.db.Exec("ALTER TABLE jobs ADD COLUMN action TEXT NOT NULL DEFAULT 'update'"); err != nil {
+		return fmt.Errorf("add job action column: %w", err)
+	}
 	return nil
 }
 
@@ -80,12 +116,21 @@ func (s *JobStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *JobStore) Enqueue(job Job) error {
+func (s *JobStore) Enqueue(job Job) (bool, error) {
+	if job.Action == "" {
+		job.Action = JobActionUpdate
+	}
+	if job.Action != JobActionUpdate && job.Action != JobActionSync {
+		return false, fmt.Errorf("unsupported job action %q", job.Action)
+	}
+
 	now := time.Now().UTC().UnixNano()
-	_, err := s.db.Exec(
-		`INSERT INTO jobs (id, file, image, tag, timestamp_ns, force, status, created_at_ns, updated_at_ns)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	result, err := s.db.Exec(
+		`INSERT INTO jobs (id, action, file, image, tag, timestamp_ns, force, status, created_at_ns, updated_at_ns)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO NOTHING`,
 		job.ID,
+		job.Action,
 		job.File,
 		job.Image,
 		job.Tag,
@@ -96,9 +141,13 @@ func (s *JobStore) Enqueue(job Job) error {
 		now,
 	)
 	if err != nil {
-		return fmt.Errorf("persist job: %w", err)
+		return false, fmt.Errorf("persist job: %w", err)
 	}
-	return nil
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check persisted job: %w", err)
+	}
+	return inserted == 1, nil
 }
 
 // RecoverInterruptedJobs makes jobs claimed by a process that stopped before
@@ -135,7 +184,7 @@ func (s *JobStore) claim(id string) (Job, bool, error) {
 	}
 	defer tx.Rollback()
 
-	query := `SELECT id, file, image, tag, timestamp_ns, force
+	query := `SELECT id, action, file, image, tag, timestamp_ns, force
 		FROM jobs WHERE status = ?`
 	args := []any{jobStatusPending}
 	if id != "" {
@@ -217,11 +266,13 @@ type rowScanner interface {
 
 func scanJob(row rowScanner) (Job, error) {
 	var job Job
+	var action string
 	var timestampNS int64
 	var force int
-	if err := row.Scan(&job.ID, &job.File, &job.Image, &job.Tag, &timestampNS, &force); err != nil {
+	if err := row.Scan(&job.ID, &action, &job.File, &job.Image, &job.Tag, &timestampNS, &force); err != nil {
 		return Job{}, err
 	}
+	job.Action = JobAction(strings.TrimSpace(action))
 	job.Timestamp = time.Unix(0, timestampNS).UTC()
 	job.Force = force != 0
 	return job, nil

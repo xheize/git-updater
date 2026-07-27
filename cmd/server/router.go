@@ -38,7 +38,7 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 	// GitHub webhook (GitHub signature verified, GITHUB_WEBHOOK_SECRET key check)
 	githubAuth := githubSignatureMiddleware(githubSecret)
 	webhooks.Post("/github", githubAuth, func(c *fiber.Ctx) error {
-		return handleJobEnqueue(c, jobQueue, jobStore, "github-webhook")
+		return handleGitHubSyncWebhook(c, jobQueue, jobStore)
 	})
 
 	// Zot webhook (API key authenticated, parses Zot events extension JSON format)
@@ -74,18 +74,22 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 	if job.Timestamp.IsZero() {
 		job.Timestamp = time.Now()
 	}
+	job.Action = gitManager.JobActionUpdate
 
-	if err := jobStore.Enqueue(job); err != nil {
+	inserted, err := jobStore.Enqueue(job)
+	if err != nil {
 		log.Printf("Failed to persist job %s: %v", job.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to persist update job",
 		})
 	}
 
-	select {
-	case jobQueue <- job:
-	default:
-		// The worker will claim this persisted job after its current work.
+	if inserted {
+		select {
+		case jobQueue <- job:
+		default:
+			// The worker will claim this persisted job after its current work.
+		}
 	}
 
 	targetMsg := job.File
@@ -96,6 +100,63 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"status":  "accepted",
 		"message": "persisted update job for " + targetMsg,
+		"jobId":   job.ID,
+	})
+}
+
+// handleGitHubSyncWebhook queues a workspace synchronization for a repository
+// push. GitHub events are not image-update requests and never accept image or
+// tag fields from the webhook body.
+func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
+	if c.Get("X-GitHub-Event") != "push" {
+		return c.JSON(fiber.Map{
+			"status":  "ignored",
+			"message": "only GitHub push events trigger workspace synchronization",
+		})
+	}
+
+	var payload struct {
+		Ref string `json:"ref"`
+	}
+	if err := c.BodyParser(&payload); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "failed to parse GitHub push payload: " + err.Error(),
+		})
+	}
+	if payload.Ref == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "GitHub push payload is missing ref",
+		})
+	}
+
+	deliveryID := c.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		deliveryID = fmt.Sprintf("generated-%d", time.Now().UnixNano())
+	}
+	job := gitManager.Job{
+		ID:        "github-" + deliveryID,
+		Action:    gitManager.JobActionSync,
+		Timestamp: time.Now(),
+	}
+
+	inserted, err := jobStore.Enqueue(job)
+	if err != nil {
+		log.Printf("Failed to persist GitHub sync job %s: %v", job.ID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to persist GitHub synchronization job",
+		})
+	}
+	if inserted {
+		select {
+		case jobQueue <- job:
+		default:
+			// The worker will claim this persisted job after its current work.
+		}
+	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"status":  "accepted",
+		"message": "persisted workspace synchronization for " + payload.Ref,
 		"jobId":   job.ID,
 	})
 }
@@ -212,6 +273,7 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 
 	job := gitManager.Job{
 		ID:        payload.ID,
+		Action:    gitManager.JobActionUpdate,
 		Image:     image,
 		Tag:       payload.Target.Tag,
 		Timestamp: payload.Timestamp,
@@ -224,17 +286,20 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 		job.Timestamp = time.Now()
 	}
 
-	if err := jobStore.Enqueue(job); err != nil {
+	inserted, err := jobStore.Enqueue(job)
+	if err != nil {
 		log.Printf("Failed to persist Zot job %s: %v", job.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to persist update job",
 		})
 	}
 
-	select {
-	case jobQueue <- job:
-	default:
-		// The worker will claim this persisted job after its current work.
+	if inserted {
+		select {
+		case jobQueue <- job:
+		default:
+			// The worker will claim this persisted job after its current work.
+		}
 	}
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
