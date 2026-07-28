@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"gopkg.in/yaml.v3"
 
 	"github.com/go-git/go-git/v6"
@@ -174,7 +175,11 @@ func getGitAuth() ([]client.Option, error) {
 			Signer: sign,
 		}
 
-		authMethod.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+		hostKeyCallback, err := sshHostKeyCallback(os.Getenv("GIT_SSH_KNOWN_HOSTS_FILE"))
+		if err != nil {
+			return nil, err
+		}
+		authMethod.HostKeyCallback = hostKeyCallback
 
 		authOption := client.WithSSHAuth(authMethod)
 		return []client.Option{authOption}, nil
@@ -196,6 +201,19 @@ func getGitAuth() ([]client.Option, error) {
 	default:
 		return nil, fmt.Errorf("invalid GIT_AUTH_METHOD: %s", gitAuthMethod)
 	}
+}
+
+func sshHostKeyCallback(knownHostsFile string) (ssh.HostKeyCallback, error) {
+	knownHostsFile = strings.TrimSpace(knownHostsFile)
+	if knownHostsFile == "" {
+		return nil, errors.New("GIT_SSH_KNOWN_HOSTS_FILE is empty")
+	}
+
+	callback, err := knownhosts.New(knownHostsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load SSH known hosts file %q: %w", knownHostsFile, err)
+	}
+	return callback, nil
 }
 
 func (g *gitManager) syncRepository() error {
