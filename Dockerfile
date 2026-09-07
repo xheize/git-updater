@@ -26,7 +26,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 
 # Create a non-root user/group for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S -g 101 appgroup && adduser -S -u 100 -G appgroup appuser
 
 WORKDIR /app
 
@@ -38,7 +38,7 @@ COPY --from=builder /app/git-updater-cli .
 RUN mkdir -p /app/workspace /app/data && chown -R appuser:appgroup /app
 
 # Run as non-root user
-USER appuser
+USER 100:101
 
 # Expose port
 EXPOSE 3000

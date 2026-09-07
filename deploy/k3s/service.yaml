@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-updater-service
+spec:
+  selector:
+    app: git-updater
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP

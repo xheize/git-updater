@@ -2,108 +2,92 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-
 	"github.com/xheize/git-updater/internal/gitManager"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	jobQueue := make(chan gitManager.Job, 100)
-	jobDatabasePath := os.Getenv("JOB_DB_PATH")
-	if jobDatabasePath == "" {
-		jobDatabasePath = "./data/jobs.db"
-	}
-	jobStore, err := gitManager.NewSQLiteJobStore(jobDatabasePath)
+func run() error {
+	// Validate secrets before opening the database or contacting Git.
+	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("Failed to initialize job store: %v", err)
+		return fmt.Errorf("invalid server configuration: %w", err)
 	}
-	defer jobStore.Close()
-	if recovered, err := jobStore.RecoverInterruptedJobs(); err != nil {
-		log.Fatalf("Failed to recover interrupted jobs: %v", err)
+	store, err := gitManager.NewSQLiteJobStore(cfg.databasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if recovered, err := store.RecoverInterruptedJobs(); err != nil {
+		return err
 	} else if recovered > 0 {
 		log.Printf("Recovered %d interrupted jobs", recovered)
 	}
-
-	repoURL := os.Getenv("GIT_REPOSITORY_URL")
-	if repoURL == "" {
-		repoURL = os.Getenv("GIT_REPO_URL")
+	queue := make(chan gitManager.Job, 100)
+	manager := gitManager.New(cfg.repoURL, queue, store)
+	if manager == nil {
+		return fmt.Errorf("failed to initialize Git manager; inspect configuration and Git errors above")
 	}
-	if repoURL == "" {
-		log.Fatalf("Failed to get git repo url. check env setting")
-	}
-
-	gitMgr := gitManager.New(repoURL, jobQueue, jobStore)
-	if gitMgr == nil {
-		log.Fatalf("Failed to initialize Git Manager. Check repository and authentication settings.")
-	}
-	targetBranch, err := gitMgr.BranchName()
+	branch, err := manager.BranchName()
 	if err != nil {
-		log.Fatalf("Failed to determine repository branch: %v", err)
+		return err
 	}
-	workerDone := gitMgr.StartWorker()
-
-	apiKey := os.Getenv("API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("WEBHOOK_SECRET")
-	}
-	if apiKey == "" {
-		log.Println("WARNING: API_KEY environment variable is not set. API endpoints will not be authenticated.")
-	}
-
-	app := fiber.New(fiber.Config{
-		AppName: "Git Updater API",
-	})
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3000"
-	}
-
-	app.Use(logger.New(logger.Config{
-		Next: func(c *fiber.Ctx) bool {
-			return c.Path() == "/health"
-		},
-	}))
-	app.Use(recover.New())
-
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "healthy"})
-	})
-
-	setupRoutes(app, jobQueue, jobStore, targetBranch)
-
-	// Create context that listens for the interrupt signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	go func() {
-		log.Printf("Server starting on port %s...", port)
-		if err := app.Listen(":" + port); err != nil {
-			log.Printf("Server failed to start: %v", err)
-		}
-	}()
-
-	<-ctx.Done()
-	log.Println("Gracefully shutting down...")
-
-	// 1. Shutdown Fiber web server first (stop accepting new requests)
-	if err := app.Shutdown(); err != nil {
-		log.Printf("Fiber shutdown error: %v", err)
+	workerDone := manager.StartWorker(ctx)
+	app := fiber.New(fiber.Config{AppName: "Git Updater API"})
+	app.Use(logger.New(logger.Config{Next: func(c *fiber.Ctx) bool { return c.Path() == "/health" || c.Path() == "/ready" }}))
+	app.Use(recover.New())
+	setupHealthRoutes(app, ctx, workerDone, store)
+	setupRoutes(app, queue, store, branch, cfg)
+	if !cfg.githubEnabled {
+		log.Print("GitHub webhook endpoint disabled; configure GITHUB_WEBHOOK_SECRET to enable it")
 	}
-
-	// 2. Close the job queue so the worker knows no more jobs will be submitted
-	close(jobQueue)
-
-	// 3. Wait for the worker to finish processing remaining jobs
-	log.Println("Waiting for worker to finish processing remaining jobs...")
+	listenErrors := make(chan error, 1)
+	go func() { listenErrors <- app.Listen(":" + cfg.port) }()
+	select {
+	case <-ctx.Done():
+	case err = <-listenErrors:
+		stop()
+	}
+	// Stop claiming new jobs; leave pending/retrying rows for the next Pod.
+	// The current job may finish, with each Git network operation capped at 30s.
+	if shutdownErr := app.ShutdownWithTimeout(10 * time.Second); shutdownErr != nil {
+		log.Printf("HTTP shutdown: %v", shutdownErr)
+	}
 	<-workerDone
-	log.Println("Server shutdown complete.")
+	return err
+}
+
+func setupHealthRoutes(app *fiber.App, ctx context.Context, workerDone <-chan struct{}, store *gitManager.JobStore) {
+	app.Get("/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "healthy"}) })
+	app.Get("/ready", func(c *fiber.Ctx) error {
+		select {
+		case <-ctx.Done():
+			return c.SendStatus(fiber.StatusServiceUnavailable)
+		case <-workerDone:
+			return c.SendStatus(fiber.StatusServiceUnavailable)
+		default:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if err := store.Ping(pingCtx); err != nil {
+			return c.SendStatus(fiber.StatusServiceUnavailable)
+		}
+		return c.JSON(fiber.Map{"status": "ready"})
+	})
 }

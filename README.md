@@ -28,6 +28,9 @@
 
 | 환경 변수명 | 필수 여부 | 설명 |
 | :--- | :--- | :--- |
+| `API_KEY` | **필수** | CLI/API/Zot 인증키. `WEBHOOK_SECRET`도 호환 지원하며 둘 다 없으면 시작 실패 |
+| `GITHUB_WEBHOOK_SECRET` | GitHub 웹훅 사용 시 필수 | HMAC 서명 검증 키. 미설정 시 GitHub 경로 비활성화 |
+| `GITHUB_WEBHOOK_ENABLED` | 선택 | 기본값은 GitHub Secret 설정 여부. `true`일 때 Secret이 없으면 시작 실패, `false`이면 경로 비활성화 |
 | `GIT_AUTH_METHOD` | **필수** | Git 인증 방식 (`ssh` 또는 `http`) |
 | `GIT_SSH_PRIVATE_KEY` | `ssh` 시 필수 | Git 인증에 사용할 SSH Private Key 내용 (String) |
 | `GIT_SSH_KNOWN_HOSTS_FILE` | `ssh` 시 **필수** | 원격 Git 서버의 공개 호스트키를 등록한 표준 `known_hosts` 파일 경로 |
@@ -35,6 +38,9 @@
 | `GIT_PASSWORD` | `http` 시 필수 | HTTP Basic 인증용 Password 또는 Personal Access Token |
 | `GIT_REPOSITORY_URL` | **필수** | 업데이트 대상 Git 저장소 주소 (`GIT_REPO_URL`도 호환 지원) |
 | `JOB_DB_PATH` | 선택 | 영속 작업 큐 SQLite DB 경로 (기본값: `./data/jobs.db`) |
+| `GIT_AUTHOR_NAME` | 선택 | 커밋 작성자 이름 (기본값: `git-updater`) |
+| `GIT_AUTHOR_EMAIL` | 선택 | 커밋 작성자 이메일 (기본값: `git-updater@localhost`) |
+| `AUTO_UPDATE` | 선택 | `true`일 때 자동 업데이트. 기본값은 비활성화이며 CLI의 강제 요청은 처리 |
 | `PORT` | 선택 | API 서버가 리스닝할 포트 (기본값: `3000`) |
 
 ---
@@ -49,6 +55,8 @@
 export GIT_AUTH_METHOD="http"
 export GIT_USERNAME="your-github-username"
 export GIT_PASSWORD="your-personal-access-token"
+export GIT_REPOSITORY_URL="https://github.com/your-org/your-repo.git"
+export API_KEY="your-api-key"
 
 # 서버 실행
 go run ./cmd/server
@@ -63,7 +71,9 @@ docker build -t git-updater:latest .
 # 컨테이너 실행
 docker run -d \
   -p 3000:3000 \
-	  -v git-updater-data:/app/data \
+  -v git-updater-data:/app/data \
+  -e API_KEY="your-api-key" \
+  -e GIT_REPOSITORY_URL="https://github.com/your-org/your-repo.git" \
   -e GIT_AUTH_METHOD="http" \
   -e GIT_USERNAME="username" \
   -e GIT_PASSWORD="token" \
@@ -81,7 +91,8 @@ docker run -d \
   -v /secure/git-private-key:/run/secrets/git-private-key:ro \
   -v /secure/git-known-hosts:/run/secrets/git-known-hosts:ro \
   -e GIT_AUTH_METHOD="ssh" \
-	-e GIT_REPOSITORY_URL="git@github.com:your-org/your-repo.git" \
+  -e GIT_REPOSITORY_URL="git@github.com:your-org/your-repo.git" \
+  -e API_KEY="your-api-key" \
   -e GIT_SSH_PRIVATE_KEY="/run/secrets/git-private-key" \
   -e GIT_SSH_KNOWN_HOSTS_FILE="/run/secrets/git-known-hosts" \
   git-updater:latest
@@ -137,3 +148,15 @@ go test -v ./...
 * `POST /api/jobs/{jobId}/retry`: `failed` 작업을 수동으로 다시 큐에 등록
 
 GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.
+
+## k3s 운영 및 상태 확인
+
+[배포 예제와 업그레이드 절차](deploy/k3s/README.md)를 확인하세요. 단일 Pod와 `Recreate` 전략, 작업 DB용 PVC, SSH Secret이 필요합니다. 예제는 자동 적용되지 않으며 이미지 태그와 환경별 설정을 채운 뒤 사용합니다.
+
+* `GET /health`: 프로세스 생존 확인용. Git 작업 성공 여부를 의미하지 않습니다.
+* `GET /ready`: 워커 종료·서버 종료 상태 및 DB 연결 확인용. 원격 Git 쓰기 권한은 실제 작업으로 검증해야 합니다.
+* `GET /api/status`: API 키로 인증 후 작업 상태별 개수와 최근 성공/실패 레코드의 갱신 시각 조회. 실패 작업의 ID를 알고 있다면 `/api/jobs/{id}`로 상세 조회합니다.
+
+Git 작성자를 명시적으로 설정하므로 컨테이너에 `.gitconfig`가 없어도 커밋할 수 있습니다. Git clone/fetch/push의 네트워크 시간 제한은 각각 30초입니다. SIGTERM 수신 시 새 작업 claim을 중단하고 대기 작업은 DB에 남겨 다음 시작에 처리합니다.
+
+**기존 버전에서 변경된 설정:** 인증키 없는 실행은 허용하지 않습니다. GitHub Secret 없이 GitHub webhook을 사용하던 구성은 Secret을 추가해야 합니다. `GITHUB_WEBHOOK_ENABLED=false`로 해당 경로를 명시적으로 끌 수도 있습니다. SQLite 사용 전 버전의 메모리 큐는 자동 이전되지 않습니다.

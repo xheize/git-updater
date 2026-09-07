@@ -1,6 +1,7 @@
 package gitManager
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -62,6 +63,45 @@ func TestJobStoreRecoversInterruptedJob(t *testing.T) {
 	}
 	if _, ok, err := restartedStore.ClaimNext(); err != nil || ok {
 		t.Fatalf("unexpected pending job after completion: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestQueueSummaryReportsFailuresAndSuccess(t *testing.T) {
+	store, err := NewSQLiteJobStore(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, id := range []string{"ok", "retry", "pending"} {
+		if _, err := store.Enqueue(Job{ID: id, Image: "nginx", Tag: "new", Timestamp: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, claimed, err := store.Claim("ok"); err != nil || !claimed {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkSucceeded("ok"); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := store.Claim("retry"); err != nil || !claimed {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.MarkFailed("retry", "temporary failure"); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Counts[jobStatusSucceeded] != 1 || summary.Counts[jobStatusRetrying] != 1 || summary.Counts[jobStatusPending] != 1 || summary.LastSuccessAt == nil || summary.LastFailureAt == nil {
+		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	if err := store.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	if err := store.Ping(context.Background()); err == nil {
+		t.Fatal("closed store reported healthy")
 	}
 }
 
