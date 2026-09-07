@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	yaml3 "gopkg.in/yaml.v3"
@@ -121,5 +122,36 @@ metadata:
 	}
 	if IsArgoCDApplication(&doc2) {
 		t.Errorf("expected IsArgoCDApplication to be false, got true")
+	}
+}
+
+func TestImageUpdatePreservesOtherFields(t *testing.T) {
+	input := []byte("metadata:\n  name: nginx\n  labels:\n    nginx: nginx\nspec:\n  containers:\n    - name: nginx\n      image: nginx:old\n      args: [nginx, 'nginx:old']\n---\nimage: busybox:old\n")
+	want := bytes.Replace(input, []byte("image: nginx:old"), []byte("image: nginx:new"), 1)
+	out, changed, err := ProcessYAMLImageUpdate(input, "nginx", "new")
+	if err != nil || !changed {
+		t.Fatalf("update: changed=%v err=%v", changed, err)
+	}
+	// Compare parsed documents so serialization formatting does not affect the assertion.
+	actualDecoder, expectedDecoder := yaml3.NewDecoder(bytes.NewReader(out)), yaml3.NewDecoder(bytes.NewReader(want))
+	for i := 0; i < 2; i++ {
+		var actual, expected interface{}
+		if err := actualDecoder.Decode(&actual); err != nil {
+			t.Fatal(err)
+		}
+		if err := expectedDecoder.Decode(&expected); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("non-image fields changed:\n%s", out)
+		}
+	}
+}
+
+func TestImageUpdateAlreadyAppliedPreservesBytes(t *testing.T) {
+	input := []byte("# preserve formatting\nspec:\n    image: 'nginx:new'\n")
+	out, changed, err := ProcessYAMLImageUpdate(input, "nginx", "new")
+	if err != nil || changed || !bytes.Equal(input, out) {
+		t.Fatalf("expected unchanged input, changed=%v err=%v output=%s", changed, err, out)
 	}
 }

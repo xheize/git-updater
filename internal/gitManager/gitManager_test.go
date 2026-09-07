@@ -1,9 +1,15 @@
 package gitManager
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestNormalizeGitURL(t *testing.T) {
@@ -168,5 +174,51 @@ func TestResolveWorkspaceFileRejectsSymlink(t *testing.T) {
 	_, _, err := resolveWorkspaceFile(workspace, "linked.yaml")
 	if err == nil {
 		t.Fatal("expected symbolic link to be rejected")
+	}
+}
+
+func TestSSHHostKeyCallback(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate host key: %v", err)
+	}
+	publicKey, err := ssh.NewPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("create public host key: %v", err)
+	}
+
+	knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsFile, []byte(knownhosts.Line([]string{"github.com"}, publicKey)+"\n"), 0600); err != nil {
+		t.Fatalf("write known hosts file: %v", err)
+	}
+
+	callback, err := sshHostKeyCallback(knownHostsFile)
+	if err != nil {
+		t.Fatalf("create callback: %v", err)
+	}
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP("140.82.112.3"), Port: 22}
+	if err := callback("github.com:22", remoteAddr, publicKey); err != nil {
+		t.Fatalf("expected matching host key to be accepted: %v", err)
+	}
+
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate different host key: %v", err)
+	}
+	otherPublicKey, err := ssh.NewPublicKey(&otherKey.PublicKey)
+	if err != nil {
+		t.Fatalf("create different public host key: %v", err)
+	}
+	if err := callback("github.com:22", remoteAddr, otherPublicKey); err == nil {
+		t.Fatal("expected a mismatched host key to be rejected")
+	}
+}
+
+func TestSSHHostKeyCallbackRequiresKnownHostsFile(t *testing.T) {
+	if _, err := sshHostKeyCallback(""); err == nil {
+		t.Fatal("expected an error for an empty known hosts file path")
+	}
+	if _, err := sshHostKeyCallback(filepath.Join(t.TempDir(), "missing_known_hosts")); err == nil {
+		t.Fatal("expected an error for a missing known hosts file")
 	}
 }

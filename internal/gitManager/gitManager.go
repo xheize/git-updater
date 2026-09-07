@@ -2,11 +2,14 @@ package gitManager
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +20,11 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
+	"github.com/go-git/go-git/v6/plumbing/transport/ssh/knownhosts"
+	sshconfig "github.com/kevinburke/ssh_config"
 	internalYaml "github.com/xheize/git-updater/internal/yaml"
 )
 
@@ -174,9 +180,13 @@ func getGitAuth() ([]client.Option, error) {
 			Signer: sign,
 		}
 
-		authMethod.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+		hostKeys, err := loadSSHKnownHosts(os.Getenv("GIT_SSH_KNOWN_HOSTS_FILE"))
+		if err != nil {
+			return nil, err
+		}
+		authMethod.HostKeyCallback = hostKeys.HostKeyCallback()
 
-		authOption := client.WithSSHAuth(authMethod)
+		authOption := client.WithSSHAuth(&knownHostsAuth{PublicKeys: authMethod, hostKeys: hostKeys})
 		return []client.Option{authOption}, nil
 
 	case string(GitAuthTypeHTTP):
@@ -196,6 +206,62 @@ func getGitAuth() ([]client.Option, error) {
 	default:
 		return nil, fmt.Errorf("invalid GIT_AUTH_METHOD: %s", gitAuthMethod)
 	}
+}
+
+func sshHostKeyCallback(knownHostsFile string) (ssh.HostKeyCallback, error) {
+	hostKeys, err := loadSSHKnownHosts(knownHostsFile)
+	if err != nil {
+		return nil, err
+	}
+	return hostKeys.HostKeyCallback(), nil
+}
+
+// Supply both verification and algorithm selection from the configured file.
+// Otherwise go-git loads its default known_hosts files even with a callback.
+type knownHostsAuth struct {
+	*gitssh.PublicKeys
+	hostKeys *knownhosts.HostKeyDB
+}
+
+func (a *knownHostsAuth) ClientConfig(ctx context.Context, req *transport.Request) (*ssh.ClientConfig, error) {
+	config, err := a.PublicKeys.ClientConfig(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// Match go-git's SSH destination resolution, including aliases and ports.
+	hostname := req.URL.Hostname()
+	if configuredHost := sshconfig.Get(hostname, "Hostname"); configuredHost != "" {
+		hostname = configuredHost
+	}
+	port := req.URL.Port()
+	if port == "" {
+		configuredPort := sshconfig.Get(req.URL.Hostname(), "Port")
+		if _, err := strconv.Atoi(configuredPort); err == nil {
+			port = configuredPort
+		}
+	}
+	if port == "" {
+		port = "22"
+	}
+	host := net.JoinHostPort(hostname, port)
+	config.HostKeyAlgorithms = a.hostKeys.HostKeyAlgorithms(host)
+	if len(config.HostKeyAlgorithms) == 0 {
+		return nil, fmt.Errorf("no SSH host keys registered for %s in GIT_SSH_KNOWN_HOSTS_FILE", host)
+	}
+	return config, nil
+}
+
+func loadSSHKnownHosts(knownHostsFile string) (*knownhosts.HostKeyDB, error) {
+	knownHostsFile = strings.TrimSpace(knownHostsFile)
+	if knownHostsFile == "" {
+		return nil, errors.New("GIT_SSH_KNOWN_HOSTS_FILE is empty")
+	}
+
+	callback, err := knownhosts.NewDB(knownHostsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load SSH known hosts file %q: %w", knownHostsFile, err)
+	}
+	return callback, nil
 }
 
 func (g *gitManager) syncRepository() error {
@@ -360,25 +426,25 @@ func (g *gitManager) Work(job Job) bool {
 		filePath, safeRelPath, err := resolveWorkspaceFile(g.workspace, relPath)
 		if err != nil {
 			log.Printf("Job %s skipped unsafe file path %q: %v\n", job.ID, relPath, err)
-			continue
+			return false
 		}
 
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			log.Printf("File %s cannot be read: %v\n", filePath, err)
-			continue
+			return false
 		}
 
 		updatedData, updated, err := internalYaml.ProcessYAMLImageUpdate(data, baseImage, job.Tag)
 		if err != nil {
 			log.Printf("Update failed for file %s: %v\n", filePath, err)
-			continue
+			return false
 		}
 
 		if updated {
 			if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
 				log.Printf("Failed to write file %s: %v\n", filePath, err)
-				continue
+				return false
 			}
 			updatedFiles = append(updatedFiles, safeRelPath)
 		}

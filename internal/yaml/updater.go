@@ -176,17 +176,20 @@ func ProcessYAMLImageUpdate(yamlData []byte, targetImage string, newTag string) 
 // UpdateImageInNode traverses the yaml.Node to find any image field matching targetImage and updates the tag
 func UpdateImageInNode(node *yaml.Node, targetImage string, newTag string) bool {
 	updated := false
-	if node.Kind == yaml.ScalarNode {
-		val := node.Value
-		if val == targetImage {
-			node.Value = targetImage + ":" + newTag
-			return true
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if key.Value == "image" && value.Kind == yaml.ScalarNode {
+				newValue := targetImage + ":" + newTag
+				if value.Value != newValue && (value.Value == targetImage || strings.HasPrefix(value.Value, targetImage+":")) {
+					value.Value = newValue
+					updated = true
+				}
+			} else if UpdateImageInNode(value, targetImage, newTag) {
+				updated = true
+			}
 		}
-		if strings.HasPrefix(val, targetImage+":") {
-			node.Value = targetImage + ":" + newTag
-			return true
-		}
-		return false
+		return updated
 	}
 
 	for _, child := range node.Content {

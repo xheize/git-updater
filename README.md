@@ -30,6 +30,7 @@
 | :--- | :--- | :--- |
 | `GIT_AUTH_METHOD` | **필수** | Git 인증 방식 (`ssh` 또는 `http`) |
 | `GIT_SSH_PRIVATE_KEY` | `ssh` 시 필수 | Git 인증에 사용할 SSH Private Key 내용 (String) |
+| `GIT_SSH_KNOWN_HOSTS_FILE` | `ssh` 시 **필수** | 원격 Git 서버의 공개 호스트키를 등록한 표준 `known_hosts` 파일 경로 |
 | `GIT_USERNAME` | `http` 시 필수 | HTTP Basic 인증용 Username |
 | `GIT_PASSWORD` | `http` 시 필수 | HTTP Basic 인증용 Password 또는 Personal Access Token |
 | `GIT_REPOSITORY_URL` | **필수** | 업데이트 대상 Git 저장소 주소 (`GIT_REPO_URL`도 호환 지원) |
@@ -66,6 +67,23 @@ docker run -d \
   -e GIT_AUTH_METHOD="http" \
   -e GIT_USERNAME="username" \
   -e GIT_PASSWORD="token" \
+  git-updater:latest
+```
+
+#### SSH 인증과 호스트키 검증
+
+SSH를 사용할 때는 개인키뿐 아니라 원격 Git 서버의 호스트키를 포함한 `known_hosts` 파일도 제공해야 합니다. 이 검증은 서버 위조(MITM)를 막기 위한 것으로, 파일에 없는 서버 키나 변경된 키와의 연결은 거부됩니다. 호스트키 지문은 GitHub/GitLab 등 Git 제공자의 공식 문서에서 확인한 뒤 파일에 등록하세요.
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -v git-updater-data:/app/data \
+  -v /secure/git-private-key:/run/secrets/git-private-key:ro \
+  -v /secure/git-known-hosts:/run/secrets/git-known-hosts:ro \
+  -e GIT_AUTH_METHOD="ssh" \
+	-e GIT_REPOSITORY_URL="git@github.com:your-org/your-repo.git" \
+  -e GIT_SSH_PRIVATE_KEY="/run/secrets/git-private-key" \
+  -e GIT_SSH_KNOWN_HOSTS_FILE="/run/secrets/git-known-hosts" \
   git-updater:latest
 ```
 
