@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,17 +14,22 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6"
+	sshconfig "github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestSSHTransportUsesConfiguredKnownHosts(t *testing.T) {
-	for _, mismatch := range []bool{false, true} {
-		name := "matching"
-		if mismatch {
-			name = "mismatched"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		mismatch, alias, explicitPort bool
+	}{
+		{name: "matching"},
+		{name: "mismatched", mismatch: true},
+		{name: "alias", alias: true},
+		{name: "alias-explicit-port", alias: true, explicitPort: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
@@ -42,6 +48,28 @@ func TestSSHTransportUsesConfiguredKnownHosts(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer listener.Close()
+			cloneURL := "ssh://git@" + listener.Addr().String() + "/repo"
+			if tc.alias {
+				host, port, err := net.SplitHostPort(listener.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				configPort := port
+				cloneURL = "ssh://git@review-alias/repo"
+				if tc.explicitPort {
+					configPort = "1"
+					cloneURL = "ssh://git@review-alias:" + port + "/repo"
+				}
+				configPath := filepath.Join(root, "ssh_config")
+				if err := os.WriteFile(configPath, []byte(fmt.Sprintf("Host review-alias\n  HostName %s\n  Port %s\n", host, configPort)), 0600); err != nil {
+					t.Fatal(err)
+				}
+				previous := sshconfig.DefaultUserSettings
+				settings := &sshconfig.UserSettings{}
+				settings.ConfigFinder(func() string { return configPath })
+				sshconfig.DefaultUserSettings = settings
+				t.Cleanup(func() { sshconfig.DefaultUserSettings = previous })
+			}
 			serverConfig := &ssh.ServerConfig{NoClientAuth: true}
 			serverConfig.AddHostKey(signer)
 			handshake := make(chan error, 1)
@@ -60,7 +88,7 @@ func TestSSHTransportUsesConfiguredKnownHosts(t *testing.T) {
 				handshake <- err
 			}()
 			registeredKey := signer.PublicKey()
-			if mismatch {
+			if tc.mismatch {
 				pub, _, err := ed25519.GenerateKey(rand.Reader)
 				if err != nil {
 					t.Fatal(err)
@@ -86,13 +114,13 @@ func TestSSHTransportUsesConfiguredKnownHosts(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			// The server deliberately closes after the handshake; it does not serve Git.
-			_, cloneErr := git.PlainCloneContext(ctx, filepath.Join(root, "clone"), &git.CloneOptions{URL: "ssh://git@" + listener.Addr().String() + "/repo", ClientOptions: opts})
+			_, cloneErr := git.PlainCloneContext(ctx, filepath.Join(root, "clone"), &git.CloneOptions{URL: cloneURL, ClientOptions: opts})
 			select {
 			case err := <-handshake:
-				if !mismatch && err != nil {
+				if !tc.mismatch && err != nil {
 					t.Fatalf("matching key rejected: handshake=%v clone=%v", err, cloneErr)
 				}
-				if mismatch && err == nil {
+				if tc.mismatch && err == nil {
 					t.Fatal("mismatched host key was accepted")
 				}
 			case <-ctx.Done():

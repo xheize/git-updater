@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v6/plumbing/transport/ssh/knownhosts"
+	sshconfig "github.com/kevinburke/ssh_config"
 	internalYaml "github.com/xheize/git-updater/internal/yaml"
 )
 
@@ -226,11 +228,22 @@ func (a *knownHostsAuth) ClientConfig(ctx context.Context, req *transport.Reques
 	if err != nil {
 		return nil, err
 	}
+	// Match go-git's SSH destination resolution, including aliases and ports.
+	hostname := req.URL.Hostname()
+	if configuredHost := sshconfig.Get(hostname, "Hostname"); configuredHost != "" {
+		hostname = configuredHost
+	}
 	port := req.URL.Port()
+	if port == "" {
+		configuredPort := sshconfig.Get(req.URL.Hostname(), "Port")
+		if _, err := strconv.Atoi(configuredPort); err == nil {
+			port = configuredPort
+		}
+	}
 	if port == "" {
 		port = "22"
 	}
-	host := net.JoinHostPort(req.URL.Hostname(), port)
+	host := net.JoinHostPort(hostname, port)
 	config.HostKeyAlgorithms = a.hostKeys.HostKeyAlgorithms(host)
 	if len(config.HostKeyAlgorithms) == 0 {
 		return nil, fmt.Errorf("no SSH host keys registered for %s in GIT_SSH_KNOWN_HOSTS_FILE", host)

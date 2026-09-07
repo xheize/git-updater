@@ -81,6 +81,7 @@ docker run -d \
   -v /secure/git-private-key:/run/secrets/git-private-key:ro \
   -v /secure/git-known-hosts:/run/secrets/git-known-hosts:ro \
   -e GIT_AUTH_METHOD="ssh" \
+	-e GIT_REPOSITORY_URL="git@github.com:your-org/your-repo.git" \
   -e GIT_SSH_PRIVATE_KEY="/run/secrets/git-private-key" \
   -e GIT_SSH_KNOWN_HOSTS_FILE="/run/secrets/git-known-hosts" \
   git-updater:latest
