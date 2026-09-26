@@ -12,6 +12,7 @@ steps:
     commands:
       - go fmt ./...
       - go vet ./...
+      - go test ./... -count=1
     when:
       event: [push, pull_request, manual]
       branch: main

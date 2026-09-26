@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
@@ -84,6 +85,7 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 
 	gitAuthOptions, err := getGitAuth()
 	if err != nil {
+		log.Printf("Git authentication configuration failed: %v", err)
 		return nil
 	}
 
@@ -117,7 +119,9 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 		return nil
 	}
 
-	gitRepo, err = git.PlainClone(workspace, &git.CloneOptions{
+	cloneCtx, cancelClone := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelClone()
+	gitRepo, err = git.PlainCloneContext(cloneCtx, workspace, &git.CloneOptions{
 		URL:               repoUrl,
 		ClientOptions:     gitAuthOptions,
 		NoCheckout:        false,
@@ -271,7 +275,9 @@ func (g *gitManager) syncRepository() error {
 	}
 
 	// 1. Fetch latest commits from remote
-	err = g.repo.Fetch(&git.FetchOptions{
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = g.repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName:    "origin",
 		ClientOptions: g.authOpts,
 		Force:         true,
@@ -317,11 +323,16 @@ func (g *gitManager) BranchName() (string, error) {
 	return head.Name().Short(), nil
 }
 
-func (g *gitManager) StartWorker() <-chan struct{} {
+func (g *gitManager) StartWorker(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			job, claimed, err := g.jobStore.ClaimNext()
 			if err != nil {
 				log.Printf("Failed to claim pending job: %v\n", err)
@@ -333,6 +344,8 @@ func (g *gitManager) StartWorker() <-chan struct{} {
 
 			var ok bool
 			select {
+			case <-ctx.Done():
+				return
 			case job, ok = <-g.jobQueue:
 				if !ok {
 					log.Println("Job queue closed. Git worker stopping...")
@@ -536,19 +549,33 @@ func (g *gitManager) addCommitPush(files []string, commitMessage string) bool {
 		}
 	}
 
-	_, err = w.Commit(commitMessage, &git.CommitOptions{})
+	_, err = w.Commit(commitMessage, &git.CommitOptions{Author: commitAuthor()})
 	if err != nil {
 		log.Printf("Git commit failed: %v\n", err)
 		return false
 	}
 
-	if err := g.repo.Push(&git.PushOptions{
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := g.repo.PushContext(ctx, &git.PushOptions{
 		ClientOptions: g.authOpts,
 	}); err != nil {
 		log.Printf("Git push failed: %v\n", err)
 		return false
 	}
 	return true
+}
+
+func commitAuthor() *object.Signature {
+	name := strings.TrimSpace(os.Getenv("GIT_AUTHOR_NAME"))
+	email := strings.TrimSpace(os.Getenv("GIT_AUTHOR_EMAIL"))
+	if name == "" {
+		name = "git-updater"
+	}
+	if email == "" {
+		email = "git-updater@localhost"
+	}
+	return &object.Signature{Name: name, Email: email, When: time.Now()}
 }
 
 func (g *gitManager) buildImageMapping() error {

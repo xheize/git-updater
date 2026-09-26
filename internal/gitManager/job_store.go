@@ -30,6 +30,44 @@ type JobStore struct {
 	db *sql.DB
 }
 
+// QueueSummary reports outcomes without exposing job payloads or credentials.
+type QueueSummary struct {
+	Counts        map[string]int64 `json:"counts"`
+	LastSuccessAt *time.Time       `json:"lastSuccessAt,omitempty"`
+	LastFailureAt *time.Time       `json:"lastFailureAt,omitempty"`
+}
+
+func (s *JobStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func (s *JobStore) Summary(ctx context.Context) (QueueSummary, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	result := QueueSummary{Counts: map[string]int64{jobStatusPending: 0, jobStatusRunning: 0, jobStatusRetrying: 0, jobStatusFailed: 0, jobStatusSucceeded: 0}}
+	rows, err := s.db.QueryContext(ctx, "SELECT status, COUNT(*), MAX(updated_at_ns) FROM jobs GROUP BY status")
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count, updatedNS int64
+		if err := rows.Scan(&state, &count, &updatedNS); err != nil {
+			return result, err
+		}
+		result.Counts[state] = count
+		updated := time.Unix(0, updatedNS).UTC()
+		if state == jobStatusSucceeded {
+			result.LastSuccessAt = &updated
+		}
+		if state == jobStatusFailed || state == jobStatusRetrying {
+			if result.LastFailureAt == nil || updated.After(*result.LastFailureAt) {
+				result.LastFailureAt = &updated
+			}
+		}
+	}
+	return result, rows.Err()
+}
+
 type JobInfo struct {
 	Job           Job        `json:"job"`
 	Status        string     `json:"status"`

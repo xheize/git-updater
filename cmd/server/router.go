@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -16,16 +15,10 @@ import (
 )
 
 // setupRoutes registers all route handlers grouped by API and Webhooks
-func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string) {
-	apiKey := os.Getenv("API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("WEBHOOK_SECRET")
-	}
-
-	githubSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string, cfg serverConfig) {
 
 	// Auth Middleware for standard API and Webhook endpoints
-	auth := authMiddleware(apiKey)
+	auth := authMiddleware(cfg.apiKey)
 
 	// Webhook Group
 	webhooks := app.Group("/webhook")
@@ -36,10 +29,11 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 	})
 
 	// GitHub webhook (GitHub signature verified, GITHUB_WEBHOOK_SECRET key check)
-	githubAuth := githubSignatureMiddleware(githubSecret)
-	webhooks.Post("/github", githubAuth, func(c *fiber.Ctx) error {
-		return handleGitHubSyncWebhook(c, jobQueue, jobStore, targetBranch)
-	})
+	if cfg.githubEnabled {
+		webhooks.Post("/github", githubSignatureMiddleware(cfg.githubSecret), func(c *fiber.Ctx) error {
+			return handleGitHubSyncWebhook(c, jobQueue, jobStore, targetBranch)
+		})
+	}
 
 	// Zot webhook (API key authenticated, parses Zot events extension JSON format)
 	webhooks.Post("/zot", auth, func(c *fiber.Ctx) error {
@@ -48,6 +42,13 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 
 	// API Group
 	api := app.Group("/api")
+	api.Get("/status", auth, func(c *fiber.Ctx) error {
+		status, err := jobStore.Summary(c.UserContext())
+		if err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "job store unavailable"})
+		}
+		return c.JSON(status)
+	})
 	api.Post("/update", auth, func(c *fiber.Ctx) error {
 		return handleJobEnqueue(c, jobQueue, jobStore, "api")
 	})
@@ -208,7 +209,7 @@ func handleJobRetry(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitMan
 func authMiddleware(apiKey string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if apiKey == "" {
-			return c.Next()
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "API authentication is not configured"})
 		}
 
 		authHeader := c.Get("Authorization")
@@ -234,8 +235,7 @@ func authMiddleware(apiKey string) fiber.Handler {
 func githubSignatureMiddleware(secret string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if secret == "" {
-			log.Println("WARNING: GITHUB_WEBHOOK_SECRET is not set. Skipping signature validation.")
-			return c.Next()
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "GitHub signature verification is not configured"})
 		}
 
 		signatureHeader := c.Get("X-Hub-Signature-256")
