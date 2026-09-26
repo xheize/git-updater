@@ -1,6 +1,26 @@
 # API 테스트 및 점검 결과
 
-점검일: 2026-09-27. production 코드 기준: `6ec8a6a` (문서 변경 이후 실행 코드는 동일). 이번 변경은 테스트 추가와 점검 기록이며 아래 발견 사항의 수정은 포함하지 않는다.
+최초 점검일: 2026-09-27. 최초 production 코드 기준: `6ec8a6a`. 아래 1–5절은 수정 전 점검 증거를 보존한 기록이다. 이후 결함 수정과 현재 동작은 다음 표를 기준으로 한다.
+
+## 결함 수정 후 확인 — 2026-09-27
+
+| 발견 사항 | 수정 후 동작 |
+|---|---|
+| 잘못된 image/tag | [Distribution reference v0.6.0](https://github.com/distribution/reference/tree/v0.6.0) parser로 repository 이름과 별도 tag 검증. 잘못된 값은 400이며 DB에 저장하지 않음. 기존 DB의 잘못된 작업도 worker에서 Git 접촉 전에 invalid_request로 종료 |
+| 경로 탈출·절대 경로·비 YAML | admission에서 400. 실행 시 실제 경로·symlink 검사도 유지. repository 경로 구분자는 `/` 사용 |
+| 동일 ID·다른 payload | 409 idempotency_conflict. 요청 의미의 fingerprint와 source를 SQLite transaction으로 보존하며 timestamp 자동 생성은 충돌로 보지 않음 |
+| API/Zot/GitHub delivery ID 충돌 | webhook ID를 source scope와 delivery ID로부터 생성. API ID와 독립적이며 반환된 opaque jobId로 조회 |
+| 이미지 미발견 | failed/no_match, 자동 재시도 없음. 이미 반영된 값은 succeeded/already_satisfied, 실제 push는 succeeded/published |
+| 정책상 자동 변경 비활성 | skipped/skipped_policy. 성공적인 push로 집계하지 않음 |
+| 오래된 이미지 인덱스 | fetch 직후 자동 검색 인덱스를 재생성. 읽기/파싱 오류는 no_match로 축약하지 않고 작업 오류 처리 |
+| 다른 GitHub repository 이벤트 | GITHUB_REPOSITORY_ID 필수. 정상 서명이어도 repository ID 불일치는 403, 누락은 400 |
+| retry DB 장애 | 503 job_store_unavailable. 상태 충돌만 409 job_state_conflict이며 내부 SQL 오류는 응답에 노출하지 않음 |
+
+검증: `RUN_API_E2E=1 go test -buildvcs=false ./... -count=1 -timeout 150s`, `go vet ./...`, `git diff --check` 통과. 실제 HTTP E2E에서도 invalid tag/path의 400·작업 미생성, conflicting ID의 409·Git 무변경, no_match/이미 반영/push의 결과 구분, 다른 GitHub ID의 403을 확인했다. 기존 정상 API/CLI/Zot publish, 재시도, 재시작도 통과했다.
+
+호환성: SQLite schema에 request_scope/payload_hash/outcome이 추가된다. 기존 기록은 보존하며, fingerprint가 없는 과거 ID를 새 요청으로 재사용하면 409다. 기존 job 조회와 수동 retry는 유지한다. 과거 결과를 추정해 outcome을 채우지 않는다. GitHub webhook을 활성화한 기존 설치는 GITHUB_REPOSITORY_ID를 추가해야 한다.
+
+책임 범위: GitHub ID는 운영자 설정과 이벤트의 일치를 확인하는 것이며 provider API로 clone URL과 identity를 자동 검증하는 기능은 아직 없다. Registry artifact 존재 검증, Helm/Kustomize semantic resolver, strict CAS, 최소 diff writer 및 웹 UI는 이번 수정 범위에 포함하지 않았다. 태그 변경 API는 image 필드에 tag/digest를 함께 받지 않는다. 저장소 내부의 digest 참조·범용 image key 검색 한계는 [설계 검토](change-controller-design-review.md)와 [현재 구현 분석](current-implementation-review.md)에 기록된 별도 과제다.
 
 ## 1. 결과
 
