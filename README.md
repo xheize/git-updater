@@ -30,6 +30,7 @@
 | :--- | :--- | :--- |
 | `API_KEY` | **필수** | CLI/API/Zot 인증키. `WEBHOOK_SECRET`도 호환 지원하며 둘 다 없으면 시작 실패 |
 | `GITHUB_WEBHOOK_SECRET` | GitHub 웹훅 사용 시 필수 | HMAC 서명 검증 키. 미설정 시 GitHub 경로 비활성화 |
+| `GITHUB_REPOSITORY_ID` | GitHub 웹훅 사용 시 필수 | 설정한 Git 저장소의 GitHub numeric repository ID. 서명된 push payload의 ID와 비교 |
 | `GITHUB_WEBHOOK_ENABLED` | 선택 | 기본값은 GitHub Secret 설정 여부. `true`일 때 Secret이 없으면 시작 실패, `false`이면 경로 비활성화 |
 | `GIT_AUTH_METHOD` | **필수** | Git 인증 방식 (`ssh` 또는 `http`) |
 | `GIT_SSH_PRIVATE_KEY` | `ssh` 시 필수 | Git 인증에 사용할 SSH Private Key 내용 (String) |
@@ -152,6 +153,8 @@ go test -v ./...
 API/CLI의 같은 ID·같은 변경 내용은 기존 작업을 반환하고, 같은 ID·다른 내용은 `409 idempotency_conflict`로 거절합니다. `/api/update`와 `/webhook`은 같은 요청 namespace입니다. GitHub/Zot delivery는 source별 ID로 분리하며 반환된 `jobId`로 조회해야 합니다. source에 따른 fingerprint는 DB에 보존됩니다. ID 없는 webhook은 새 요청으로 취급하며, 기존 버전에서 fingerprint 없이 저장된 ID를 새 요청에 재사용하면 409가 반환됩니다(기존 조회·수동 retry는 유지).
 
 GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.
+
+GitHub webhook 활성화 시 repository ID가 없으면 시작에 실패합니다. 올바른 서명이라도 다른 repository ID는 403, ID 누락은 400으로 거절합니다. ID는 저장소 이름 변경과 무관한 GitHub ID를 설정합니다. 이번 보호는 운영자가 지정한 ID에 이벤트를 묶는 기능이며, provider API로 clone URL과 ID의 일치를 자동 검증하는 기능은 아닙니다.
 
 작업 조회의 `outcome`은 `published`(commit/push), `already_satisfied`(이미 반영됨), `synchronized`(Git 동기화), `no_match`(선택한 파일에 이미지 없음), `skipped_policy`(자동 변경 비활성), `invalid_request`(기존 DB의 잘못된 요청)를 구분합니다. `no_match`는 자동 재시도 없는 failed, 정책 skip은 skipped 상태입니다. `/api/status`에도 outcome별 개수를 제공합니다. 기존 버전의 완료 작업은 결과를 추정해 채우지 않으므로 outcome이 비어 있을 수 있습니다. 자동 검색은 fetch 직후 인덱스를 재구성하며, 읽기/파싱 실패를 이미지 미발견으로 처리하지 않습니다.
 

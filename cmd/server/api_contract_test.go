@@ -29,7 +29,7 @@ func newContractAPI(t *testing.T) (*fiber.App, *gitManager.JobStore, chan gitMan
 	queue := make(chan gitManager.Job, 1)
 	app := fiber.New()
 	setupRoutes(app, queue, store, "main", serverConfig{
-		apiKey: "contract-key", githubEnabled: true, githubSecret: "contract-secret",
+		apiKey: "contract-key", githubEnabled: true, githubSecret: "contract-secret", githubRepositoryID: 123,
 	})
 	return app, store, queue
 }
@@ -207,13 +207,16 @@ func TestAPIContractGitHubSignatureAndFiltering(t *testing.T) {
 		name, event, body, signature string
 		want                         int
 	}{
-		{"missing signature", "push", `{"ref":"refs/heads/main"}`, "", 401},
-		{"wrong algorithm", "push", `{"ref":"refs/heads/main"}`, "sha1=abc", 400},
-		{"invalid signature", "push", `{"ref":"refs/heads/main"}`, "sha256=abc", 401},
-		{"tampered body", "push", `{"ref":"refs/heads/main"}`, contractSignature(`{"ref":"refs/heads/other"}`), 401},
+		{"missing signature", "push", `{"ref":"refs/heads/main","repository":{"id":123}}`, "", 401},
+		{"wrong algorithm", "push", `{"ref":"refs/heads/main","repository":{"id":123}}`, "sha1=abc", 400},
+		{"invalid signature", "push", `{"ref":"refs/heads/main","repository":{"id":123}}`, "sha256=abc", 401},
+		{"tampered body", "push", `{"ref":"refs/heads/main","repository":{"id":123}}`, contractSignature(`{"ref":"refs/heads/other","repository":{"id":123}}`), 401},
 		{"malformed body", "push", `{`, "sign", 400},
 		{"missing ref", "push", `{}`, "sign", 400},
-		{"other branch", "push", `{"ref":"refs/heads/other"}`, "sign", 200},
+		{"missing identity", "push", `{"ref":"refs/heads/main"}`, "sign", 400},
+		{"wrong identity", "push", `{"ref":"refs/heads/main","repository":{"id":999}}`, "sign", 403},
+		{"identity is not integer", "push", `{"ref":"refs/heads/main","repository":{"id":123.5}}`, "sign", 400},
+		{"other branch", "push", `{"ref":"refs/heads/other","repository":{"id":123}}`, "sign", 200},
 		{"other event", "ping", `{}`, "sign", 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,13 +232,13 @@ func TestAPIContractGitHubSignatureAndFiltering(t *testing.T) {
 		})
 	}
 	app, store, queue := newContractAPI(t)
-	body := `{"ref":"refs/heads/main","image":"ignored","tag":"ignored"}`
+	body := `{"ref":"refs/heads/main","repository":{"id":123},"image":"ignored","tag":"ignored"}`
 	for i := 0; i < 2; i++ {
 		contractRequest(t, app, "POST", "/webhook/github", body, map[string]string{
 			"X-GitHub-Event": "push", "X-GitHub-Delivery": "duplicate", "X-Hub-Signature-256": contractSignature(body),
 		}, 202)
 	}
-	info, found, err := store.Get(deliveryJobID("github", "duplicate"))
+	info, found, err := store.Get(deliveryJobID("github:123", "duplicate"))
 	if err != nil || !found || info.Job.Action != gitManager.JobActionSync || info.Job.Image != "" || info.Job.Tag != "" || len(queue) != 1 {
 		t.Fatalf("invalid GitHub sync admission: %+v, found=%v err=%v queue=%d", info, found, err, len(queue))
 	}

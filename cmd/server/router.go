@@ -33,7 +33,7 @@ func setupRoutes(app *fiber.App, jobQueue chan gitManager.Job, jobStore *gitMana
 	// GitHub webhook (GitHub signature verified, GITHUB_WEBHOOK_SECRET key check)
 	if cfg.githubEnabled {
 		webhooks.Post("/github", githubSignatureMiddleware(cfg.githubSecret), func(c *fiber.Ctx) error {
-			return handleGitHubSyncWebhook(c, jobQueue, jobStore, targetBranch)
+			return handleGitHubSyncWebhook(c, jobQueue, jobStore, targetBranch, cfg.githubRepositoryID)
 		})
 	}
 
@@ -119,7 +119,7 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 // handleGitHubSyncWebhook queues a workspace synchronization for a repository
 // push. GitHub events are not image-update requests and never accept image or
 // tag fields from the webhook body.
-func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string) error {
+func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore, targetBranch string, repositoryID int64) error {
 	if c.Get("X-GitHub-Event") != "push" {
 		return c.JSON(fiber.Map{
 			"status":  "ignored",
@@ -128,7 +128,10 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 	}
 
 	var payload struct {
-		Ref string `json:"ref"`
+		Ref        string `json:"ref"`
+		Repository struct {
+			ID int64 `json:"id"`
+		} `json:"repository"`
 	}
 	if err := c.BodyParser(&payload); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -139,6 +142,15 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "GitHub push payload is missing ref",
 		})
+	}
+	if repositoryID <= 0 {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "GitHub repository identity is not configured", "code": "repository_unconfigured"})
+	}
+	if payload.Repository.ID <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "GitHub repository ID is required", "code": "repository_missing"})
+	}
+	if payload.Repository.ID != repositoryID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "GitHub repository does not match configured identity", "code": "repository_mismatch"})
 	}
 	if payload.Ref != "refs/heads/"+targetBranch {
 		return c.JSON(fiber.Map{
@@ -151,13 +163,14 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 	if deliveryID == "" {
 		deliveryID = fmt.Sprintf("generated-%d", time.Now().UnixNano())
 	}
+	scope := fmt.Sprintf("github:%d", repositoryID)
 	job := gitManager.Job{
-		ID:        deliveryJobID("github", deliveryID),
+		ID:        deliveryJobID(scope, deliveryID),
 		Action:    gitManager.JobActionSync,
 		Timestamp: time.Now(),
 	}
 
-	inserted, err := jobStore.EnqueueScoped(job, "github", webhookPayloadHash(c.Body()))
+	inserted, err := jobStore.EnqueueScoped(job, scope, webhookPayloadHash(c.Body()))
 	if err != nil {
 		if errors.Is(err, gitManager.ErrIdempotencyConflict) {
 			return idempotencyConflict(c)

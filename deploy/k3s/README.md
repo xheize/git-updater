@@ -13,7 +13,7 @@
 ## 준비
 
 1. 배포 YAML의 `REPLACE_WITH_REVIEWED_TAG`를 **이 PR이 포함된 빌드의 고정 태그 또는 digest**로 바꾼다. `v0.0.3`과 이전 이미지에는 새 설정·상태 API가 없다. 기존 배포의 selector와 Service 이름, namespace도 비교한다.
-2. namespace를 만들고 Secret을 준비한다. 아래 `server.env`는 저장소 밖에 권한을 제한해 보관한다. `API_KEY`, `GIT_REPOSITORY_URL`을 포함해야 한다. GitHub 웹훅을 사용할 때는 `GITHUB_WEBHOOK_SECRET`도 추가하고 Deployment의 `GITHUB_WEBHOOK_ENABLED`를 `true`로 바꾼다. 설정하지 않으면 `/webhook/github`는 404다.
+2. namespace를 만들고 Secret을 준비한다. 아래 `server.env`는 저장소 밖에 권한을 제한해 보관한다. `API_KEY`, `GIT_REPOSITORY_URL`을 포함해야 한다. GitHub 웹훅을 사용할 때는 `GITHUB_WEBHOOK_SECRET`과 `GITHUB_REPOSITORY_ID`도 추가하고 Deployment의 `GITHUB_WEBHOOK_ENABLED`를 `true`로 바꾼다. 설정하지 않으면 `/webhook/github`는 404다.
 
 ```bash
 kubectl apply -f deploy/k3s/namespace.yaml

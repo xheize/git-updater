@@ -119,7 +119,8 @@ func TestAPIProcessLocalGit(t *testing.T) {
 		cmd.Env = processEnvironment(map[string]string{
 			"API_KEY": "contract-key", "WEBHOOK_SECRET": "", "GITHUB_WEBHOOK_SECRET": "contract-secret",
 			"GITHUB_WEBHOOK_ENABLED": "true", "GIT_AUTH_METHOD": "http", "GIT_USERNAME": "local-test",
-			"GIT_PASSWORD": "local-test", "GIT_REPOSITORY_URL": filepath.ToSlash(origin), "GIT_REPO_URL": "",
+			"GITHUB_REPOSITORY_ID": "123",
+			"GIT_PASSWORD":         "local-test", "GIT_REPOSITORY_URL": filepath.ToSlash(origin), "GIT_REPO_URL": "",
 			"PORT": strconv.Itoa(port), "JOB_DB_PATH": filepath.Join(root, "jobs.db"), "AUTO_UPDATE": "true",
 			"GIT_AUTHOR_NAME": "API Test", "GIT_AUTHOR_EMAIL": "api-test@example.invalid",
 		})
@@ -228,7 +229,11 @@ func TestAPIProcessLocalGit(t *testing.T) {
 		t.Fatal("Zot request did not reach the remote")
 	}
 	beforeSync := head()
-	github := `{"ref":"refs/heads/main"}`
+	otherRepo := `{"ref":"refs/heads/main","repository":{"id":999}}`
+	request("POST", "/webhook/github", otherRepo, map[string]string{
+		"X-GitHub-Event": "push", "X-GitHub-Delivery": "wrong-repo", "X-Hub-Signature-256": contractSignature(otherRepo),
+	}, 403)
+	github := `{"ref":"refs/heads/main","repository":{"id":123}}`
 	githubResult := request("POST", "/webhook/github", github, map[string]string{
 		"X-GitHub-Event": "push", "X-GitHub-Delivery": "sync", "X-Hub-Signature-256": contractSignature(github),
 	}, 202)

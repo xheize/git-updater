@@ -17,7 +17,8 @@ func validTestConfig(t *testing.T) {
 		"API_KEY": "test-api-key", "WEBHOOK_SECRET": "", "GIT_REPOSITORY_URL": "https://example.com/repo.git", "GIT_REPO_URL": "",
 		"GIT_AUTH_METHOD": "http", "GIT_USERNAME": "test", "GIT_PASSWORD": "test-password",
 		"GITHUB_WEBHOOK_SECRET": "", "GITHUB_WEBHOOK_ENABLED": "", "PORT": "", "JOB_DB_PATH": "",
-		"GIT_SSH_PRIVATE_KEY": "", "GIT_SSH_KNOWN_HOSTS_FILE": "",
+		"GITHUB_REPOSITORY_ID": "123",
+		"GIT_SSH_PRIVATE_KEY":  "", "GIT_SSH_KNOWN_HOSTS_FILE": "",
 	} {
 		t.Setenv(key, value)
 	}
@@ -35,6 +36,8 @@ func TestConfigRequiresAuthentication(t *testing.T) {
 		{name: "legacy API key", env: map[string]string{"API_KEY": "", "WEBHOOK_SECRET": "legacy"}},
 		{name: "GitHub enabled without secret", env: map[string]string{"GITHUB_WEBHOOK_ENABLED": "true"}, invalid: true},
 		{name: "GitHub secret enables route", env: map[string]string{"GITHUB_WEBHOOK_SECRET": "github"}, github: true},
+		{name: "GitHub missing identity", env: map[string]string{"GITHUB_WEBHOOK_SECRET": "github", "GITHUB_REPOSITORY_ID": ""}, invalid: true},
+		{name: "GitHub invalid identity", env: map[string]string{"GITHUB_WEBHOOK_SECRET": "github", "GITHUB_REPOSITORY_ID": "-1"}, invalid: true},
 		{name: "GitHub explicitly disabled", env: map[string]string{"GITHUB_WEBHOOK_SECRET": "github", "GITHUB_WEBHOOK_ENABLED": "false"}},
 		{name: "missing repository", env: map[string]string{"GIT_REPOSITORY_URL": ""}, invalid: true},
 		{name: "missing SSH known hosts", env: map[string]string{"GIT_AUTH_METHOD": "ssh", "GIT_SSH_PRIVATE_KEY": "test"}, invalid: true},
@@ -51,6 +54,9 @@ func TestConfigRequiresAuthentication(t *testing.T) {
 			}
 			if !tc.invalid && cfg.githubEnabled != tc.github {
 				t.Fatalf("GitHub enabled = %v", cfg.githubEnabled)
+			}
+			if tc.github && cfg.githubRepositoryID != 123 {
+				t.Fatalf("unexpected repository identity %d", cfg.githubRepositoryID)
 			}
 		})
 	}

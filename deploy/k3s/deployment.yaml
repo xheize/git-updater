@@ -55,7 +55,7 @@ spec:
               value: git-updater
             - name: GIT_AUTHOR_EMAIL
               value: git-updater@localhost
-            # Set true only after adding GITHUB_WEBHOOK_SECRET to server-env.
+            # Set true after adding GITHUB_WEBHOOK_SECRET and GITHUB_REPOSITORY_ID to server-env.
             - name: GITHUB_WEBHOOK_ENABLED
               value: "false"
           securityContext:

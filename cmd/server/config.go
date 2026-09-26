@@ -10,6 +10,7 @@ import (
 type serverConfig struct {
 	repoURL, apiKey, githubSecret, databasePath, port string
 	githubEnabled                                     bool
+	githubRepositoryID                                int64
 }
 
 func loadConfig() (serverConfig, error) {
@@ -40,6 +41,13 @@ func loadConfig() (serverConfig, error) {
 	}
 	if cfg.githubEnabled && strings.TrimSpace(cfg.githubSecret) == "" {
 		return cfg, fmt.Errorf("GITHUB_WEBHOOK_SECRET is required when GitHub webhooks are enabled")
+	}
+	if cfg.githubEnabled {
+		id, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("GITHUB_REPOSITORY_ID")), 10, 64)
+		if err != nil || id <= 0 {
+			return cfg, fmt.Errorf("GITHUB_REPOSITORY_ID must be a positive repository ID when GitHub webhooks are enabled")
+		}
+		cfg.githubRepositoryID = id
 	}
 	switch os.Getenv("GIT_AUTH_METHOD") {
 	case "ssh":
