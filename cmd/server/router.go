@@ -197,7 +197,11 @@ func handleJobStatus(c *fiber.Ctx, jobStore *gitManager.JobStore) error {
 func handleJobRetry(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
 	job, found, err := jobStore.Retry(c.Params("id"))
 	if err != nil {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		if errors.Is(err, gitManager.ErrJobStateConflict) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "only failed jobs can be retried", "code": "job_state_conflict"})
+		}
+		log.Printf("Failed to retry job %s: %v", c.Params("id"), err)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "job store unavailable", "code": "job_store_unavailable"})
 	}
 	if !found {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "job not found"})

@@ -289,13 +289,17 @@ func TestAPIContractDatabaseOutage(t *testing.T) {
 		{"POST", "/webhook/zot", `{"action":"push","target":{"repository":"nginx","tag":"v2"}}`, 500},
 		{"GET", "/api/status", "", 503},
 		{"GET", "/api/jobs/missing", "", 500},
+		{"POST", "/api/jobs/missing/retry", "", 503},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			app, store, queue := newContractAPI(t)
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			contractRequest(t, app, tc.method, tc.path, tc.body, contractAuth(), tc.want)
+			result := contractRequest(t, app, tc.method, tc.path, tc.body, contractAuth(), tc.want)
+			if tc.path == "/api/jobs/missing/retry" && (result["code"] != "job_store_unavailable" || result["error"] != "job store unavailable") {
+				t.Fatalf("unstable or leaked storage error: %v", result)
+			}
 			if len(queue) != 0 {
 				t.Fatal("unpersisted job was queued")
 			}

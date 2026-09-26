@@ -27,6 +27,7 @@ const (
 )
 
 var ErrIdempotencyConflict = errors.New("job ID already belongs to a different request")
+var ErrJobStateConflict = errors.New("job state does not allow retry")
 
 // JobStore persists jobs so that accepted work is not lost when the process
 // stops. It is intentionally backed by one SQLite connection because Git
@@ -409,7 +410,7 @@ func (s *JobStore) Retry(id string) (Job, bool, error) {
 		return Job{}, found, err
 	}
 	if info.Status != jobStatusFailed {
-		return Job{}, true, fmt.Errorf("job %s is %s, only failed jobs can be retried", id, info.Status)
+		return Job{}, true, ErrJobStateConflict
 	}
 
 	now := time.Now().UTC().UnixNano()
@@ -423,7 +424,7 @@ func (s *JobStore) Retry(id string) (Job, bool, error) {
 		return Job{}, true, fmt.Errorf("check retried job: %w", err)
 	}
 	if changed != 1 {
-		return Job{}, true, fmt.Errorf("job %s retry state changed", id)
+		return Job{}, true, ErrJobStateConflict
 	}
 	return info.Job, true, nil
 }
