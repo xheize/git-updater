@@ -3,6 +3,7 @@ module github.com/xheize/git-updater
 go 1.25.10
 
 require (
+	github.com/distribution/reference v0.6.0
 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/kevinburke/ssh_config v1.6.0
@@ -27,6 +28,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect

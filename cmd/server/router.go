@@ -69,9 +69,9 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 		})
 	}
 
-	if job.Image == "" || job.Tag == "" {
+	if err := gitManager.ValidateUpdateJob(job); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "parameters 'image' and 'tag' are required",
+			"error": err.Error(), "code": "invalid_update",
 		})
 	}
 
@@ -320,6 +320,9 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 		Image:     image,
 		Tag:       payload.Target.Tag,
 		Timestamp: payload.Timestamp,
+	}
+	if err := gitManager.ValidateUpdateJob(job); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error(), "code": "invalid_update"})
 	}
 
 	if job.ID == "" {

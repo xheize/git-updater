@@ -169,6 +169,12 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	request("GET", "/api/status", "", nil, 401)
 	request("POST", "/api/update", "{", contractAuth(), 400)
 	request("GET", "/api/jobs/missing", "", contractAuth(), 404)
+	request("POST", "/api/update", `{"id":"invalid-tag","image":"registry.test/demo/api","tag":"bad tag"}`, contractAuth(), 400)
+	request("GET", "/api/jobs/invalid-tag", "", contractAuth(), 404)
+	request("POST", "/api/update", `{"id":"invalid-path","file":"../outside.yaml","image":"registry.test/demo/api","tag":"v2"}`, contractAuth(), 400)
+	if head() != base {
+		t.Fatal("invalid request changed remote Git")
+	}
 	body := `{"id":"api-update","image":"registry.test/demo/api","tag":"v2"}`
 	request("POST", "/api/update", body, contractAuth(), 202)
 	waitJob("api-update", "succeeded")

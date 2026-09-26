@@ -115,6 +115,8 @@ go build -o git-updater-cli ./cmd/cli
 * `-image`: 업데이트할 컨테이너 이미지 이름
 * `-tag`: 새로 적용할 컨테이너 이미지 태그
 
+`image`는 tag/digest를 포함하지 않는 repository 이름이고 `tag`는 별도 필드입니다. 공백 등 잘못된 image/tag와 경로 탈출·절대 경로·비 YAML 파일은 API에서 400으로 거절합니다. 파일 경로는 repository 기준 상대 경로와 `/` 구분자를 사용합니다. 실제 파일 존재 여부와 symlink 검사는 작업 실행 시에도 검증합니다.
+
 #### 사용 예시
 ```bash
 # 명령행 인자를 모두 명시하여 요청 전송

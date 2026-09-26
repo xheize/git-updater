@@ -388,6 +388,12 @@ func (g *gitManager) processClaimedJob(job Job) {
 		g.markJobFailed(job.ID, fmt.Sprintf("unsupported job action %q", job.Action))
 		return
 	}
+	if err := ValidateUpdateJob(job); err != nil {
+		if storeErr := g.jobStore.MarkRejected(job.ID, err.Error()); storeErr != nil {
+			log.Printf("Failed to reject invalid job %s: %v", job.ID, storeErr)
+		}
+		return
+	}
 
 	if !g.autoUpdate && !job.Force {
 		log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
@@ -413,6 +419,10 @@ func (g *gitManager) markJobFailed(id, failure string) {
 }
 
 func (g *gitManager) Work(job Job) bool {
+	if err := ValidateUpdateJob(job); err != nil {
+		log.Printf("Invalid update job %s: %v", job.ID, err)
+		return false
+	}
 	// Sync workspace with remote branch before reading
 	if err := g.syncRepository(); err != nil {
 		log.Printf("Failed to sync repository before work: %v\n", err)

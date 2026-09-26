@@ -291,6 +291,11 @@ func (s *JobStore) MarkSucceeded(id string) error {
 	return s.mark(id, jobStatusSucceeded, "")
 }
 
+// MarkRejected records a permanent request error without scheduling retries.
+func (s *JobStore) MarkRejected(id, failure string) error {
+	return s.markWithRetry(id, jobStatusFailed, failure, 0)
+}
+
 func (s *JobStore) MarkFailed(id, failure string) error {
 	var attempts int
 	if err := s.db.QueryRow("SELECT attempts FROM jobs WHERE id = ? AND status = ?", id, jobStatusRunning).Scan(&attempts); err != nil {

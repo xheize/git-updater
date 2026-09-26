@@ -104,6 +104,10 @@ func TestAPIContractInvalidUpdatePayload(t *testing.T) {
 		for i, body := range []string{
 			`{`, `{}`, `null`, `[]`, `{"image":"nginx"}`, `{"tag":"v2"}`,
 			`{"image":123,"tag":"v2"}`, `{"image":"nginx","tag":"v2","timestamp":"invalid"}`,
+			`{"image":" ","tag":" "}`, `{"image":"nginx","tag":"bad tag"}`,
+			`{"image":"nginx:old","tag":"v2"}`, `{"image":"nginx","tag":"v2","file":"../outside.yaml"}`,
+			`{"image":"nginx","tag":"v2","file":"C:\\outside.yaml"}`,
+			`{"image":"nginx","tag":"v2","file":"app.yaml:stream"}`,
 		} {
 			t.Run(fmt.Sprintf("%s/%d", route, i), func(t *testing.T) {
 				app, store, _ := newContractAPI(t)
@@ -245,6 +249,8 @@ func TestAPIContractZotAdmission(t *testing.T) {
 		{"malformed", `{`, 400},
 		{"missing repository", `{"action":"push","target":{"tag":"v2"}}`, 400},
 		{"missing tag", `{"action":"push","target":{"repository":"demo/api"}}`, 400},
+		{"invalid tag", `{"action":"push","target":{"repository":"demo/api","tag":"bad tag"}}`, 400},
+		{"invalid host", `{"action":"push","target":{"repository":"demo/api","tag":"v2"},"request":{"host":"https://registry.test"}}`, 400},
 		{"pull ignored", `{"action":"pull"}`, 200},
 		{"delete ignored", `{"action":"delete"}`, 200},
 	} {
