@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -379,7 +380,7 @@ func (g *gitManager) processClaimedJob(job Job) {
 			g.markJobFailed(job.ID, fmt.Sprintf("rebuild image mapping after synchronization failed: %v", err))
 			return
 		}
-		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+		if err := g.jobStore.MarkCompleted(job.ID, OutcomeSynchronized); err != nil {
 			log.Printf("Failed to mark sync job %s as completed: %v\n", job.ID, err)
 		}
 		return
@@ -397,18 +398,20 @@ func (g *gitManager) processClaimedJob(job Job) {
 
 	if !g.autoUpdate && !job.Force {
 		log.Printf("Skipping job %s: autoUpdate is disabled and job is not forced. Logging only.\n", job.ID)
-		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+		if err := g.jobStore.MarkCompleted(job.ID, OutcomeSkippedPolicy); err != nil {
 			log.Printf("Failed to mark skipped job %s as completed: %v\n", job.ID, err)
 		}
 		return
 	}
 
-	if g.Work(job) {
-		if err := g.jobStore.MarkSucceeded(job.ID); err != nil {
+	outcome, err := g.work(job)
+	if err == nil {
+		if err := g.jobStore.MarkCompleted(job.ID, outcome); err != nil {
 			log.Printf("Failed to mark job %s as completed: %v\n", job.ID, err)
 		}
 		return
 	}
+	log.Printf("Job %s failed: %v", job.ID, err)
 	g.markJobFailed(job.ID, "Git update failed; inspect server logs for details")
 }
 
@@ -419,14 +422,17 @@ func (g *gitManager) markJobFailed(id, failure string) {
 }
 
 func (g *gitManager) Work(job Job) bool {
+	outcome, err := g.work(job)
+	return err == nil && outcome != OutcomeNoMatch
+}
+
+func (g *gitManager) work(job Job) (JobOutcome, error) {
 	if err := ValidateUpdateJob(job); err != nil {
-		log.Printf("Invalid update job %s: %v", job.ID, err)
-		return false
+		return "", err
 	}
 	// Sync workspace with remote branch before reading
 	if err := g.syncRepository(); err != nil {
-		log.Printf("Failed to sync repository before work: %v\n", err)
-		return false
+		return "", fmt.Errorf("sync before update: %w", err)
 	}
 
 	var filesToUpdate []string
@@ -435,39 +441,41 @@ func (g *gitManager) Work(job Job) bool {
 	if job.File != "" {
 		filesToUpdate = []string{job.File}
 	} else {
+		// Never decide no_match or mutation targets from an older revision.
+		if err := g.buildImageMapping(); err != nil {
+			return "", fmt.Errorf("index current revision: %w", err)
+		}
 		g.mu.Lock()
 		filesToUpdate = g.imageToFiles[baseImage]
 		g.mu.Unlock()
 		if len(filesToUpdate) == 0 {
 			log.Printf("Job %s skipped: no files found in repository referencing image %s\n", job.ID, baseImage)
-			return true
+			return OutcomeNoMatch, nil
 		}
 	}
 
 	var updatedFiles []string
+	matched := false
 	for _, relPath := range filesToUpdate {
 		filePath, safeRelPath, err := resolveWorkspaceFile(g.workspace, relPath)
 		if err != nil {
-			log.Printf("Job %s skipped unsafe file path %q: %v\n", job.ID, relPath, err)
-			return false
+			return "", fmt.Errorf("resolve update path: %w", err)
 		}
 
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			log.Printf("File %s cannot be read: %v\n", filePath, err)
-			return false
+			return "", fmt.Errorf("read update file: %w", err)
 		}
 
-		updatedData, updated, err := internalYaml.ProcessYAMLImageUpdate(data, baseImage, job.Tag)
+		updatedData, found, updated, err := internalYaml.ProcessYAMLImageUpdateResult(data, baseImage, job.Tag)
 		if err != nil {
-			log.Printf("Update failed for file %s: %v\n", filePath, err)
-			return false
+			return "", fmt.Errorf("parse/update file: %w", err)
 		}
+		matched = matched || found
 
 		if updated {
 			if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
-				log.Printf("Failed to write file %s: %v\n", filePath, err)
-				return false
+				return "", fmt.Errorf("write update file: %w", err)
 			}
 			updatedFiles = append(updatedFiles, safeRelPath)
 		}
@@ -475,7 +483,10 @@ func (g *gitManager) Work(job Job) bool {
 
 	if len(updatedFiles) == 0 {
 		log.Printf("Job %s completed: no files were actually modified.\n", job.ID)
-		return true
+		if !matched {
+			return OutcomeNoMatch, nil
+		}
+		return OutcomeAlreadySatisfied, nil
 	}
 
 	commitMessage := fmt.Sprintf("Update image %s:%s in %d files", baseImage, job.Tag, len(updatedFiles))
@@ -484,7 +495,7 @@ func (g *gitManager) Work(job Job) bool {
 	}
 
 	if !g.addCommitPush(updatedFiles, commitMessage) {
-		return false
+		return "", errors.New("commit/push failed")
 	}
 
 	// Rebuild in-memory mapping after push
@@ -492,7 +503,7 @@ func (g *gitManager) Work(job Job) bool {
 		log.Printf("Failed to rebuild image mapping after update: %v\n", err)
 	}
 
-	return true
+	return OutcomePublished, nil
 }
 
 // resolveWorkspaceFile returns an existing YAML file only when every path
@@ -607,17 +618,23 @@ func (g *gitManager) buildImageMapping() error {
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".yaml" || ext == ".yml" {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("cannot index symlink %s", path)
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
-				return nil // Skip unreadable files
+				return fmt.Errorf("read index file %s: %w", path, err)
 			}
 
 			dec := yaml.NewDecoder(bytes.NewReader(data))
 			for {
 				var doc yaml.Node
 				err := dec.Decode(&doc)
+				if errors.Is(err, io.EOF) {
+					break
+				}
 				if err != nil {
-					break // EOF or parse error
+					return fmt.Errorf("parse index file %s: %w", path, err)
 				}
 
 				// Check if it's an ArgoCD Application

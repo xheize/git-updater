@@ -177,7 +177,10 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	}
 	body := `{"id":"api-update","image":"registry.test/demo/api","tag":"v2"}`
 	request("POST", "/api/update", body, contractAuth(), 202)
-	waitJob("api-update", "succeeded")
+	published := waitJob("api-update", "succeeded")
+	if published["outcome"] != "published" {
+		t.Fatalf("publish outcome: %v", published)
+	}
 	updated := head()
 	if updated == base || strings.TrimSpace(gitAt(origin, "rev-parse", "main^")) != base {
 		t.Fatal("API update did not publish exactly one new commit")
@@ -197,9 +200,17 @@ func TestAPIProcessLocalGit(t *testing.T) {
 		t.Fatal("conflicting duplicate changed remote Git")
 	}
 	request("POST", "/webhook", `{"id":"noop","image":"registry.test/demo/api","tag":"v2"}`, contractAuth(), 202)
-	waitJob("noop", "succeeded")
+	noop := waitJob("noop", "succeeded")
+	if noop["outcome"] != "already_satisfied" {
+		t.Fatalf("no-op outcome: %v", noop)
+	}
 	if head() != updated {
 		t.Fatal("already-applied update created another commit")
+	}
+	request("POST", "/api/update", `{"id":"absent","image":"registry.test/absent","tag":"v2"}`, contractAuth(), 202)
+	absent := waitJob("absent", "failed")
+	if absent["outcome"] != "no_match" || absent["attempts"] != float64(1) || head() != updated {
+		t.Fatalf("missing image result: %v", absent)
 	}
 	processCommand(t, "", cliBinary, "-server", baseURL, "-key", "contract-key", "-image", "registry.test/demo/api", "-tag", "v3")
 	deadline := time.Now().Add(10 * time.Second)

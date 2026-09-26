@@ -22,12 +22,24 @@ const (
 	jobStatusRetrying  = "retrying"
 	jobStatusSucceeded = "succeeded"
 	jobStatusFailed    = "failed"
+	jobStatusSkipped   = "skipped"
 	maxJobAttempts     = 3
 	jobRetryBaseDelay  = 5 * time.Second
 )
 
 var ErrIdempotencyConflict = errors.New("job ID already belongs to a different request")
 var ErrJobStateConflict = errors.New("job state does not allow retry")
+
+type JobOutcome string
+
+const (
+	OutcomePublished        JobOutcome = "published"
+	OutcomeAlreadySatisfied JobOutcome = "already_satisfied"
+	OutcomeNoMatch          JobOutcome = "no_match"
+	OutcomeSkippedPolicy    JobOutcome = "skipped_policy"
+	OutcomeSynchronized     JobOutcome = "synchronized"
+	OutcomeInvalidRequest   JobOutcome = "invalid_request"
+)
 
 // JobStore persists jobs so that accepted work is not lost when the process
 // stops. It is intentionally backed by one SQLite connection because Git
@@ -39,6 +51,7 @@ type JobStore struct {
 // QueueSummary reports outcomes without exposing job payloads or credentials.
 type QueueSummary struct {
 	Counts        map[string]int64 `json:"counts"`
+	Outcomes      map[string]int64 `json:"outcomes"`
 	LastSuccessAt *time.Time       `json:"lastSuccessAt,omitempty"`
 	LastFailureAt *time.Time       `json:"lastFailureAt,omitempty"`
 }
@@ -48,21 +61,24 @@ func (s *JobStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx
 func (s *JobStore) Summary(ctx context.Context) (QueueSummary, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	result := QueueSummary{Counts: map[string]int64{jobStatusPending: 0, jobStatusRunning: 0, jobStatusRetrying: 0, jobStatusFailed: 0, jobStatusSucceeded: 0}}
-	rows, err := s.db.QueryContext(ctx, "SELECT status, COUNT(*), MAX(updated_at_ns) FROM jobs GROUP BY status")
+	result := QueueSummary{Counts: map[string]int64{jobStatusPending: 0, jobStatusRunning: 0, jobStatusRetrying: 0, jobStatusSucceeded: 0, jobStatusFailed: 0, jobStatusSkipped: 0}, Outcomes: map[string]int64{}}
+	rows, err := s.db.QueryContext(ctx, "SELECT status, outcome, COUNT(*), MAX(updated_at_ns) FROM jobs GROUP BY status, outcome")
 	if err != nil {
 		return result, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var state string
+		var state, outcome string
 		var count, updatedNS int64
-		if err := rows.Scan(&state, &count, &updatedNS); err != nil {
+		if err := rows.Scan(&state, &outcome, &count, &updatedNS); err != nil {
 			return result, err
 		}
-		result.Counts[state] = count
+		result.Counts[state] += count
+		if outcome != "" {
+			result.Outcomes[outcome] += count
+		}
 		updated := time.Unix(0, updatedNS).UTC()
-		if state == jobStatusSucceeded {
+		if state == jobStatusSucceeded && (result.LastSuccessAt == nil || updated.After(*result.LastSuccessAt)) {
 			result.LastSuccessAt = &updated
 		}
 		if state == jobStatusFailed || state == jobStatusRetrying {
@@ -77,6 +93,7 @@ func (s *JobStore) Summary(ctx context.Context) (QueueSummary, error) {
 type JobInfo struct {
 	Job           Job        `json:"job"`
 	Status        string     `json:"status"`
+	Outcome       JobOutcome `json:"outcome,omitempty"`
 	Attempts      int        `json:"attempts"`
 	LastError     string     `json:"lastError,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
@@ -169,7 +186,7 @@ func (s *JobStore) ensureColumns() error {
 			return fmt.Errorf("add job retry schedule column: %w", err)
 		}
 	}
-	for _, name := range []string{"request_scope", "payload_hash"} {
+	for _, name := range []string{"request_scope", "payload_hash", "outcome"} {
 		if !columns[name] {
 			if _, err := s.db.Exec("ALTER TABLE jobs ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''"); err != nil {
 				return fmt.Errorf("add job request identity column: %w", err)
@@ -342,7 +359,21 @@ func (s *JobStore) MarkSucceeded(id string) error {
 
 // MarkRejected records a permanent request error without scheduling retries.
 func (s *JobStore) MarkRejected(id, failure string) error {
-	return s.markWithRetry(id, jobStatusFailed, failure, 0)
+	return s.markOutcome(id, jobStatusFailed, OutcomeInvalidRequest, failure, 0)
+}
+
+func (s *JobStore) MarkCompleted(id string, outcome JobOutcome) error {
+	status, failure := jobStatusSucceeded, ""
+	switch outcome {
+	case OutcomePublished, OutcomeAlreadySatisfied, OutcomeSynchronized:
+	case OutcomeNoMatch:
+		status, failure = jobStatusFailed, "requested image not found in selected files"
+	case OutcomeSkippedPolicy:
+		status = jobStatusSkipped
+	default:
+		return fmt.Errorf("unsupported completion outcome %q", outcome)
+	}
+	return s.markOutcome(id, status, outcome, failure, 0)
 }
 
 func (s *JobStore) MarkFailed(id, failure string) error {
@@ -368,13 +399,18 @@ func (s *JobStore) mark(id, status, failure string) error {
 }
 
 func (s *JobStore) markWithRetry(id, status, failure string, nextAttemptAt int64) error {
+	return s.markOutcome(id, status, "", failure, nextAttemptAt)
+}
+
+func (s *JobStore) markOutcome(id, status string, outcome JobOutcome, failure string, nextAttemptAt int64) error {
 	result, err := s.db.Exec(
-		`UPDATE jobs SET status = ?, last_error = ?, updated_at_ns = ?, next_attempt_at_ns = ?
+		`UPDATE jobs SET status = ?, last_error = ?, updated_at_ns = ?, next_attempt_at_ns = ?, outcome = ?
 		 WHERE id = ? AND status = ?`,
 		status,
 		failure,
 		time.Now().UTC().UnixNano(),
 		nextAttemptAt,
+		outcome,
 		id,
 		jobStatusRunning,
 	)
@@ -393,7 +429,7 @@ func (s *JobStore) markWithRetry(id, status, failure string, nextAttemptAt int64
 
 func (s *JobStore) Get(id string) (JobInfo, bool, error) {
 	row := s.db.QueryRow(`SELECT id, action, file, image, tag, timestamp_ns, force, status, attempts,
-		COALESCE(last_error, ''), created_at_ns, updated_at_ns, next_attempt_at_ns FROM jobs WHERE id = ?`, id)
+		COALESCE(last_error, ''), created_at_ns, updated_at_ns, next_attempt_at_ns, outcome FROM jobs WHERE id = ?`, id)
 	info, err := scanJobInfo(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobInfo{}, false, nil
@@ -414,7 +450,7 @@ func (s *JobStore) Retry(id string) (Job, bool, error) {
 	}
 
 	now := time.Now().UTC().UnixNano()
-	result, err := s.db.Exec(`UPDATE jobs SET status = ?, attempts = 0, last_error = '', updated_at_ns = ?, next_attempt_at_ns = ?
+	result, err := s.db.Exec(`UPDATE jobs SET status = ?, attempts = 0, last_error = '', outcome = '', updated_at_ns = ?, next_attempt_at_ns = ?
 		WHERE id = ? AND status = ?`, jobStatusPending, now, now, id, jobStatusFailed)
 	if err != nil {
 		return Job{}, true, fmt.Errorf("retry job: %w", err)
@@ -453,7 +489,7 @@ func scanJobInfo(row rowScanner) (JobInfo, error) {
 	var timestampNS, createdAtNS, updatedAtNS, nextAttemptAtNS int64
 	var force int
 	if err := row.Scan(&info.Job.ID, &action, &info.Job.File, &info.Job.Image, &info.Job.Tag, &timestampNS,
-		&force, &info.Status, &info.Attempts, &info.LastError, &createdAtNS, &updatedAtNS, &nextAttemptAtNS); err != nil {
+		&force, &info.Status, &info.Attempts, &info.LastError, &createdAtNS, &updatedAtNS, &nextAttemptAtNS, &info.Outcome); err != nil {
 		return JobInfo{}, err
 	}
 	info.Job.Action = JobAction(strings.TrimSpace(action))

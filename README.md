@@ -153,6 +153,8 @@ API/CLI의 같은 ID·같은 변경 내용은 기존 작업을 반환하고, 같
 
 GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.
 
+작업 조회의 `outcome`은 `published`(commit/push), `already_satisfied`(이미 반영됨), `synchronized`(Git 동기화), `no_match`(선택한 파일에 이미지 없음), `skipped_policy`(자동 변경 비활성), `invalid_request`(기존 DB의 잘못된 요청)를 구분합니다. `no_match`는 자동 재시도 없는 failed, 정책 skip은 skipped 상태입니다. `/api/status`에도 outcome별 개수를 제공합니다. 기존 버전의 완료 작업은 결과를 추정해 채우지 않으므로 outcome이 비어 있을 수 있습니다. 자동 검색은 fetch 직후 인덱스를 재구성하며, 읽기/파싱 실패를 이미지 미발견으로 처리하지 않습니다.
+
 ## k3s 운영 및 상태 확인
 
 [배포 예제와 업그레이드 절차](deploy/k3s/README.md)를 확인하세요. 단일 Pod와 `Recreate` 전략, 작업 DB용 PVC, SSH Secret이 필요합니다. 예제는 자동 적용되지 않으며 이미지 태그와 환경별 설정을 채운 뒤 사용합니다.

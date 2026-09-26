@@ -43,7 +43,7 @@ func TestLegacyJobIdentityMigration(t *testing.T) {
 	if _, err := s.Enqueue(j); err != nil {
 		t.Fatal(err)
 	}
-	for _, col := range []string{"request_scope", "payload_hash"} {
+	for _, col := range []string{"request_scope", "payload_hash", "outcome"} {
 		if _, err := s.db.Exec("ALTER TABLE jobs DROP COLUMN " + col); err != nil {
 			t.Fatal(err)
 		}

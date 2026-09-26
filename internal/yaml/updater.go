@@ -137,6 +137,13 @@ func IsArgoCDApplication(node *yaml.Node) bool {
 
 // ProcessYAMLImageUpdate searches for the targetImage inside the YAML document and updates its tag to newTag
 func ProcessYAMLImageUpdate(yamlData []byte, targetImage string, newTag string) ([]byte, bool, error) {
+	data, _, changed, err := ProcessYAMLImageUpdateResult(yamlData, targetImage, newTag)
+	return data, changed, err
+}
+
+// ProcessYAMLImageUpdateResult distinguishes a missing reference from an
+// already-applied tag. Both cases leave the original bytes untouched.
+func ProcessYAMLImageUpdateResult(yamlData []byte, targetImage string, newTag string) ([]byte, bool, bool, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(yamlData))
 	var documents []*yaml.Node
 	for {
@@ -146,20 +153,23 @@ func ProcessYAMLImageUpdate(yamlData []byte, targetImage string, newTag string) 
 			break
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		documents = append(documents, &doc)
 	}
 
-	updated := false
+	updated, matched := false, false
 	for _, doc := range documents {
+		if matchesImageNode(doc, targetImage) {
+			matched = true
+		}
 		if UpdateImageInNode(doc, targetImage, newTag) {
 			updated = true
 		}
 	}
 
 	if !updated {
-		return yamlData, false, nil
+		return yamlData, matched, false, nil
 	}
 
 	var buf bytes.Buffer
@@ -167,10 +177,32 @@ func ProcessYAMLImageUpdate(yamlData []byte, targetImage string, newTag string) 
 	enc.SetIndent(2)
 	for _, doc := range documents {
 		if err := enc.Encode(doc); err != nil {
-			return nil, false, err
+			return nil, matched, false, err
 		}
 	}
-	return buf.Bytes(), true, nil
+	return buf.Bytes(), matched, true, nil
+}
+
+func matchesImageNode(node *yaml.Node, target string) bool {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if key.Value == "image" && value.Kind == yaml.ScalarNode &&
+				(value.Value == target || strings.HasPrefix(value.Value, target+":")) {
+				return true
+			}
+			if matchesImageNode(value, target) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, child := range node.Content {
+		if matchesImageNode(child, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateImageInNode traverses the yaml.Node to find any image field matching targetImage and updates the tag
