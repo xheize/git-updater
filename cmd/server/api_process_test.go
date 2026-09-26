@@ -192,6 +192,10 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	if head() != updated || info["attempts"] != float64(1) {
 		t.Fatal("duplicate delivery repeated the effect")
 	}
+	request("POST", "/api/update", `{"id":"api-update","image":"registry.test/demo/api","tag":"v99"}`, contractAuth(), 409)
+	if head() != updated {
+		t.Fatal("conflicting duplicate changed remote Git")
+	}
 	request("POST", "/webhook", `{"id":"noop","image":"registry.test/demo/api","tag":"v2"}`, contractAuth(), 202)
 	waitJob("noop", "succeeded")
 	if head() != updated {
@@ -206,17 +210,18 @@ func TestAPIProcessLocalGit(t *testing.T) {
 		t.Fatal("CLI request did not reach the remote")
 	}
 	zot := `{"id":"zot-update","action":"push","target":{"repository":"demo/api","tag":"v4"},"request":{"host":"registry.test"}}`
-	request("POST", "/webhook/zot", zot, contractAuth(), 202)
-	waitJob("zot-update", "succeeded")
+	zotResult := request("POST", "/webhook/zot", zot, contractAuth(), 202)
+	zotJobID := zotResult["jobId"].(string)
+	waitJob(zotJobID, "succeeded")
 	if !strings.Contains(gitAt(origin, "show", "main:worker.yaml"), "registry.test/demo/api:v4") {
 		t.Fatal("Zot request did not reach the remote")
 	}
 	beforeSync := head()
 	github := `{"ref":"refs/heads/main"}`
-	request("POST", "/webhook/github", github, map[string]string{
+	githubResult := request("POST", "/webhook/github", github, map[string]string{
 		"X-GitHub-Event": "push", "X-GitHub-Delivery": "sync", "X-Hub-Signature-256": contractSignature(github),
 	}, 202)
-	waitJob("github-sync", "succeeded")
+	waitJob(githubResult["jobId"].(string), "succeeded")
 	if head() != beforeSync {
 		t.Fatal("GitHub sync unexpectedly changed Git")
 	}
@@ -242,7 +247,7 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	}
 	stop()
 	start("restart")
-	info = request("GET", "/api/jobs/zot-update", "", contractAuth(), 200)
+	info = request("GET", "/api/jobs/"+zotJobID, "", contractAuth(), 200)
 	if info["status"] != "succeeded" {
 		t.Fatalf("completed job did not survive restart: %v", info)
 	}

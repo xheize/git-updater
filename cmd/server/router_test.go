@@ -79,7 +79,7 @@ func TestGitHubPushWebhookQueuesSyncJob(t *testing.T) {
 		t.Fatalf("unexpected queued job for other branch: %#v", unexpected)
 	default:
 	}
-	if _, found, err := store.Get("github-delivery-2"); err != nil || found {
+	if _, found, err := store.Get(deliveryJobID("github", "delivery-2")); err != nil || found {
 		t.Fatalf("other-branch job was persisted: found=%v err=%v", found, err)
 	}
 }

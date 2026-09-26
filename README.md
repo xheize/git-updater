@@ -149,6 +149,8 @@ go test -v ./...
 * `GET /api/jobs/{jobId}`: 작업 상태, 시도 횟수, 마지막 오류 및 다음 재시도 시각 조회
 * `POST /api/jobs/{jobId}/retry`: `failed` 작업을 수동으로 다시 큐에 등록
 
+API/CLI의 같은 ID·같은 변경 내용은 기존 작업을 반환하고, 같은 ID·다른 내용은 `409 idempotency_conflict`로 거절합니다. `/api/update`와 `/webhook`은 같은 요청 namespace입니다. GitHub/Zot delivery는 source별 ID로 분리하며 반환된 `jobId`로 조회해야 합니다. source에 따른 fingerprint는 DB에 보존됩니다. ID 없는 webhook은 새 요청으로 취급하며, 기존 버전에서 fingerprint 없이 저장된 ID를 새 요청에 재사용하면 409가 반환됩니다(기존 조회·수동 retry는 유지).
+
 GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.
 
 ## k3s 운영 및 상태 확인

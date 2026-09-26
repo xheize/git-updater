@@ -235,7 +235,7 @@ func TestAPIContractGitHubSignatureAndFiltering(t *testing.T) {
 			"X-GitHub-Event": "push", "X-GitHub-Delivery": "duplicate", "X-Hub-Signature-256": contractSignature(body),
 		}, 202)
 	}
-	info, found, err := store.Get("github-duplicate")
+	info, found, err := store.Get(deliveryJobID("github", "duplicate"))
 	if err != nil || !found || info.Job.Action != gitManager.JobActionSync || info.Job.Image != "" || info.Job.Tag != "" || len(queue) != 1 {
 		t.Fatalf("invalid GitHub sync admission: %+v, found=%v err=%v queue=%d", info, found, err, len(queue))
 	}
@@ -271,7 +271,7 @@ func TestAPIContractZotAdmission(t *testing.T) {
 			if host != "" {
 				want = host + "/" + want
 			}
-			info, found, err := store.Get("zot-one")
+			info, found, err := store.Get(deliveryJobID("zot:"+host, "zot-one"))
 			if err != nil || !found || info.Job.Image != want || info.Job.Tag != "v2" || info.Job.Timestamp.IsZero() || len(queue) != 1 {
 				t.Fatalf("invalid Zot job: %+v found=%v err=%v", info, found, err)
 			}

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -83,8 +85,11 @@ func handleJobEnqueue(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 	}
 	job.Action = gitManager.JobActionUpdate
 
-	inserted, err := jobStore.Enqueue(job)
+	inserted, err := jobStore.EnqueueScoped(job, "update", "")
 	if err != nil {
+		if errors.Is(err, gitManager.ErrIdempotencyConflict) {
+			return idempotencyConflict(c)
+		}
 		log.Printf("Failed to persist job %s: %v", job.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to persist update job",
@@ -147,13 +152,16 @@ func handleGitHubSyncWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStor
 		deliveryID = fmt.Sprintf("generated-%d", time.Now().UnixNano())
 	}
 	job := gitManager.Job{
-		ID:        "github-" + deliveryID,
+		ID:        deliveryJobID("github", deliveryID),
 		Action:    gitManager.JobActionSync,
 		Timestamp: time.Now(),
 	}
 
-	inserted, err := jobStore.Enqueue(job)
+	inserted, err := jobStore.EnqueueScoped(job, "github", webhookPayloadHash(c.Body()))
 	if err != nil {
+		if errors.Is(err, gitManager.ErrIdempotencyConflict) {
+			return idempotencyConflict(c)
+		}
 		log.Printf("Failed to persist GitHub sync job %s: %v", job.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to persist GitHub synchronization job",
@@ -315,7 +323,6 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 	}
 
 	job := gitManager.Job{
-		ID:        payload.ID,
 		Action:    gitManager.JobActionUpdate,
 		Image:     image,
 		Tag:       payload.Target.Tag,
@@ -325,15 +332,20 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error(), "code": "invalid_update"})
 	}
 
-	if job.ID == "" {
-		job.ID = fmt.Sprintf("zot-%d", time.Now().UnixNano())
+	if payload.ID == "" {
+		payload.ID = fmt.Sprintf("generated-%d", time.Now().UnixNano())
 	}
+	scope := "zot:" + payload.Request.Host
+	job.ID = deliveryJobID(scope, payload.ID)
 	if job.Timestamp.IsZero() {
 		job.Timestamp = time.Now()
 	}
 
-	inserted, err := jobStore.Enqueue(job)
+	inserted, err := jobStore.EnqueueScoped(job, scope, webhookPayloadHash(c.Body()))
 	if err != nil {
+		if errors.Is(err, gitManager.ErrIdempotencyConflict) {
+			return idempotencyConflict(c)
+		}
 		log.Printf("Failed to persist Zot job %s: %v", job.ID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to persist update job",
@@ -353,4 +365,30 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 		"message": "persisted update job for " + image,
 		"jobId":   job.ID,
 	})
+}
+
+func idempotencyConflict(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+		"error": "job ID was already used for a different request", "code": "idempotency_conflict",
+	})
+}
+
+// Keep delivery namespaces independent of client-selected API job IDs and of
+// other provider connections. Clients must use the returned opaque jobId.
+func deliveryJobID(scope, delivery string) string {
+	data, _ := json.Marshal([]string{scope, delivery})
+	digest := sha256.Sum256(data)
+	return "delivery-" + hex.EncodeToString(digest[:])
+}
+
+func webhookPayloadHash(body []byte) string {
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return "" // Callers have already validated the JSON payload.
+	}
+	canonical, _ := json.Marshal(value)
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:])
 }

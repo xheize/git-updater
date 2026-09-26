@@ -2,7 +2,10 @@ package gitManager
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +25,8 @@ const (
 	maxJobAttempts     = 3
 	jobRetryBaseDelay  = 5 * time.Second
 )
+
+var ErrIdempotencyConflict = errors.New("job ID already belongs to a different request")
 
 // JobStore persists jobs so that accepted work is not lost when the process
 // stops. It is intentionally backed by one SQLite connection because Git
@@ -163,6 +168,13 @@ func (s *JobStore) ensureColumns() error {
 			return fmt.Errorf("add job retry schedule column: %w", err)
 		}
 	}
+	for _, name := range []string{"request_scope", "payload_hash"} {
+		if !columns[name] {
+			if _, err := s.db.Exec("ALTER TABLE jobs ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("add job request identity column: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -171,6 +183,13 @@ func (s *JobStore) Close() error {
 }
 
 func (s *JobStore) Enqueue(job Job) (bool, error) {
+	return s.EnqueueScoped(job, "", "")
+}
+
+// EnqueueScoped compares immutable request content before acknowledging a
+// duplicate. eventHash captures provider-specific data not represented by Job.
+// Timestamp is deliberately excluded: adapters generate it for each receipt.
+func (s *JobStore) EnqueueScoped(job Job, scope, eventHash string) (bool, error) {
 	if job.Action == "" {
 		job.Action = JobActionUpdate
 	}
@@ -178,10 +197,23 @@ func (s *JobStore) Enqueue(job Job) (bool, error) {
 		return false, fmt.Errorf("unsupported job action %q", job.Action)
 	}
 
+	canonical, _ := json.Marshal(struct {
+		Scope, EventHash string
+		Action           JobAction
+		File, Image, Tag string
+		Force            bool
+	}{scope, eventHash, job.Action, job.File, job.Image, job.Tag, job.Force})
+	digest := sha256.Sum256(canonical)
+	payloadHash := hex.EncodeToString(digest[:])
 	now := time.Now().UTC().UnixNano()
-	result, err := s.db.Exec(
-		`INSERT INTO jobs (id, action, file, image, tag, timestamp_ns, force, status, created_at_ns, updated_at_ns, next_attempt_at_ns)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin enqueue: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(
+		`INSERT INTO jobs (id, action, file, image, tag, timestamp_ns, force, status, created_at_ns, updated_at_ns, next_attempt_at_ns, request_scope, payload_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO NOTHING`,
 		job.ID,
 		job.Action,
@@ -194,6 +226,8 @@ func (s *JobStore) Enqueue(job Job) (bool, error) {
 		now,
 		now,
 		now,
+		scope,
+		payloadHash,
 	)
 	if err != nil {
 		return false, fmt.Errorf("persist job: %w", err)
@@ -201,6 +235,20 @@ func (s *JobStore) Enqueue(job Job) (bool, error) {
 	inserted, err := result.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("check persisted job: %w", err)
+	}
+	if inserted == 0 {
+		var storedScope, storedHash string
+		if err := tx.QueryRow("SELECT request_scope, payload_hash FROM jobs WHERE id = ?", job.ID).Scan(&storedScope, &storedHash); err != nil {
+			return false, fmt.Errorf("read duplicate identity: %w", err)
+		}
+		// Pre-migration rows have no verified fingerprint. They stay readable
+		// and retryable, but cannot silently acknowledge a new delivery.
+		if storedScope != scope || storedHash != payloadHash {
+			return false, ErrIdempotencyConflict
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit enqueue: %w", err)
 	}
 	return inserted == 1, nil
 }
