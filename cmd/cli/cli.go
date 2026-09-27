@@ -15,6 +15,21 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 1 || (len(os.Args) == 2 && (os.Args[1] == "--help" || os.Args[1] == "-h")) {
+		_ = runControllerCLI([]string{"help"}, os.Stdout)
+		return
+	}
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		if err := runControllerCLI(os.Args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	legacyMain()
+}
+
+func legacyMain() {
 	serverFlag := flag.String("server", "", "Git Updater Server URL (can also be set via GIT_UPDATER_SERVER_URL env, defaults to http://localhost:3000)")
 	fileFlag := flag.String("file", "", "Target YAML file path to update (optional, scans workspace if omitted)")
 	imageFlag := flag.String("image", "", "Container image name (required)")

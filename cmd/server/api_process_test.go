@@ -117,7 +117,7 @@ func TestAPIProcessLocalGit(t *testing.T) {
 		cmd := exec.Command(serverBinary)
 		cmd.Dir, cmd.Stdout, cmd.Stderr = work, log, log
 		cmd.Env = processEnvironment(map[string]string{
-			"API_KEY": "contract-key", "WEBHOOK_SECRET": "", "GITHUB_WEBHOOK_SECRET": "contract-secret",
+			"CONTROLLER_LOCAL_MODE": "true", "API_KEY": "contract-key", "WEBHOOK_SECRET": "", "GITHUB_WEBHOOK_SECRET": "contract-secret",
 			"GITHUB_WEBHOOK_ENABLED": "true", "GIT_AUTH_METHOD": "http", "GIT_USERNAME": "local-test",
 			"GITHUB_REPOSITORY_ID": "123",
 			"GIT_PASSWORD":         "local-test", "GIT_REPOSITORY_URL": filepath.ToSlash(origin), "GIT_REPO_URL": "",
@@ -246,28 +246,66 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	if failed["attempts"] != float64(3) || head() != beforeSync {
 		t.Fatalf("invalid failure/retry behavior: %v", failed)
 	}
-	// Repair the fixture so a manual retry can complete without waiting for
-	// another three-attempt failure cycle.
+	// A repaired repository invalidates the old intent baseline. Manual retry
+	// must not silently approve the new state; a new intent is required.
 	gitAt(seed, "fetch", origin, "main")
 	gitAt(seed, "reset", "--hard", "FETCH_HEAD")
-	if err := os.WriteFile(filepath.Join(seed, "missing.yaml"), []byte("image: registry.test/demo/api:v4\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(seed, "missing.yaml"), []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: repaired\nspec:\n  containers:\n  - name: api\n    image: registry.test/demo/api:v4\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	gitAt(seed, "add", "missing.yaml")
 	gitAt(seed, "-c", "user.name=API Test", "-c", "user.email=api-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "add retry target")
 	gitAt(seed, "push", origin, "main")
 	request("POST", "/api/jobs/missing-file/retry", "", contractAuth(), 202)
-	waitJob("missing-file", "succeeded")
-	if !strings.Contains(gitAt(origin, "show", "main:missing.yaml"), ":v5") {
-		t.Fatal("manual retry did not publish the repaired target")
+	retried := waitJob("missing-file", "failed")
+	if retried["outcome"] != "conflict" {
+		t.Fatalf("stale manual retry: %v", retried)
 	}
+	request("POST", "/api/update", `{"id":"repaired-file","file":"missing.yaml","image":"registry.test/demo/api","tag":"v5"}`, contractAuth(), 202)
+	waitJob("repaired-file", "succeeded")
+	if !strings.Contains(gitAt(origin, "show", "main:missing.yaml"), ":v5") {
+		t.Fatal("new intent did not publish the repaired target")
+	}
+
+	// CLI model/preview/apply use the same persisted controller as webhooks.
+	cli := func(args ...string) string {
+		return processCommand(t, "", cliBinary, append(args, "--server", baseURL, "--key", "contract-key", "--json")...)
+	}
+	inspect := cli("inspect")
+	if !strings.Contains(inspect, "effectiveImage") {
+		t.Fatal(inspect)
+	}
+	beforePlan := head()
+	preview := cli("plan", "--id", "cli-reviewed", "--change", "registry.test/demo/api=v6")
+	if !strings.Contains(preview, `"state": "planned"`) || head() != beforePlan {
+		t.Fatal("preview mutated Git or failed")
+	}
+	request("POST", "/api/changesets", `{"id":"api-stale","changes":[{"image":"registry.test/demo/api","tag":"v7"}]}`, contractAuth(), 200)
+	applied := cli("apply", "--id", "cli-reviewed")
+	if !strings.Contains(applied, `"state": "published"`) || head() == beforePlan {
+		t.Fatal(applied)
+	}
+	if strings.TrimSpace(gitAt(origin, "rev-parse", "main^")) != beforePlan {
+		t.Fatal("plan did not publish exactly one commit")
+	}
+	afterApply := head()
+	cli("apply", "--id", "cli-reviewed")
+	if head() != afterApply {
+		t.Fatal("duplicate apply created another commit")
+	}
+	request("POST", "/api/changesets/api-stale/apply", "", contractAuth(), 409)
+	request("GET", "/api/changesets", "", nil, 401)
+	request("GET", "/api/jobs?limit=0", "", contractAuth(), 400)
+	cli("jobs")
+	cli("changesets")
 	stop()
 	start("restart")
 	info = request("GET", "/api/jobs/"+zotJobID, "", contractAuth(), 200)
 	if info["status"] != "succeeded" {
 		t.Fatalf("completed job did not survive restart: %v", info)
 	}
-	t.Log("PASS: real HTTP authentication, API/CLI/Zot -> SQLite -> commit/push, duplicate/no-op, GitHub sync, automatic/manual retry, restart durability")
+	cli("show", "--id", "cli-reviewed")
+	t.Log("PASS: CLI inspect/plan/apply/history, stale approval/retry rejection, real HTTP authentication, API/CLI/Zot -> SQLite -> commit/push, duplicate/no-op, GitHub sync, automatic/manual retry, restart durability")
 }
 
 func processCommand(t *testing.T, dir, executable string, args ...string) string {
