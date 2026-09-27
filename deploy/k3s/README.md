@@ -6,11 +6,13 @@
 
 - **replicas=1, Recreate**: SQLite와 Git 워크스페이스는 단일 워커 전용이다. HPA/여러 Pod를 지원하지 않는다. Recreate는 업데이트 중 구·신 Pod 동시 실행을 막으며 짧은 중단이 발생한다. 수동 중복 실행도 피한다.
 - `/app/data`는 PVC에 저장한다. SQLite의 DB, `-wal`, `-shm`은 같은 로컬 볼륨에 둔다. NFS/RWX 공유 볼륨을 사용하지 않는다. `local-path`는 노드 로컬 저장소이므로 노드 손실에 대비한 별도 백업이 필요하다.
-- `/work`는 emptyDir이며 저장소는 그 아래 `workspace`에 다시 clone한다. `/app/workspace`나 `/work/workspace` 자체에 볼륨을 마운트하지 않는다. 초기화에서 해당 디렉터리를 제거할 수 있기 때문이다.
+- `/work`는 emptyDir이며 저장소는 그 아래 `workspace`에 다시 clone한다. workspace 옆의 OS lock도 쓸 수 있도록 `/work`를 마운트한다. CLI MVP는 origin 불일치나 sync 실패 시 기존 workspace를 삭제하지 않는다.
 - UID 100/GID 101을 이미지와 manifest에 일치시켰다. PVC provisioner가 `fsGroup: 101`을 반영해 쓰기 권한을 제공하는지 확인한다. Pod가 `permission denied`로 시작하지 못하면 해당 PV의 소유권을 조정한다.
 - 기본 CI는 다중 아키텍처 이미지를 게시하지 않는다. amd64 노드에 배치하며 ARM 사용 시 별도 ARM 이미지 빌드·검증이 필요하다.
 
 ## 준비
+
+CLI MVP부터 SSH Git 인증과 별도로 provider 검증용 `GITHUB_TOKEN`이 필요하다. 서버 Secret에 `REGISTRY_HOSTS`와 필요 시 `REGISTRY_AUTH_HOST`/registry 인증도 추가한다. Pod imagePullSecret은 controller의 registry API 인증을 대신하지 않는다. [MVP 설정](../../docs/cli-mvp.md)을 적용하지 않으면 health/readiness가 정상이어도 변경 validation이 거절될 수 있다. `CONTROLLER_LOCAL_MODE`는 운영에 설정하지 않는다.
 
 1. 배포 YAML의 `REPLACE_WITH_REVIEWED_TAG`를 **이 PR이 포함된 빌드의 고정 태그 또는 digest**로 바꾼다. `v0.0.3`과 이전 이미지에는 새 설정·상태 API가 없다. 기존 배포의 selector와 Service 이름, namespace도 비교한다.
 2. namespace를 만들고 Secret을 준비한다. 아래 `server.env`는 저장소 밖에 권한을 제한해 보관한다. `API_KEY`, `GIT_REPOSITORY_URL`을 포함해야 한다. GitHub 웹훅을 사용할 때는 `GITHUB_WEBHOOK_SECRET`과 `GITHUB_REPOSITORY_ID`도 추가하고 Deployment의 `GITHUB_WEBHOOK_ENABLED`를 `true`로 바꾼다. 설정하지 않으면 `/webhook/github`는 404다.

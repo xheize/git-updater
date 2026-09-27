@@ -1,5 +1,7 @@
 # git-updater
 
+현재는 **CLI 중심 GitOps Change Controller MVP**를 제공한다. `inspect` / `images` / `plan` / `apply` / `changesets`로 저장소 구조와 이미지 사용처를 확인하고, 복수 이미지 변경을 preview한 뒤 한 commit으로 게시한다. 웹 UI와 클러스터 apply 기능은 없다. **[MVP 사용법·지원 범위·필수 추가 설정](docs/cli-mvp.md)**을 먼저 확인한다. 운영 변경에는 GitHub provider 검증과 `REGISTRY_HOSTS` 및 필요한 registry 인증 설정이 추가로 필요하다.
+
 `git-updater`는 GitOps 파이프라인(예: ArgoCD, Flux 등)에서 컨테이너 이미지 태그 업데이트를 자동화하기 위한 도구입니다. 이 프로젝트는 이미지 업데이트 요청을 큐(Queue)를 통해 비동기로 처리하는 **API 서버**와, 이 서버에 업데이트 요청을 보낼 수 있는 **CLI 클라이언트**로 구성되어 있습니다.
 
 ---
@@ -18,6 +20,8 @@
 * **`cmd/server/`**: Webhook 요청을 받고 Git 워커를 구동하는 API 서버 엔트리포인트
 * **`cmd/cli/`**: 개발자 PC나 CI 파이프라인에서 API 서버로 업데이트 요청을 쉽게 보낼 수 있는 CLI 도구 엔트리포인트
 * **`internal/gitManager/`**: Git Clone, 파일 업데이트, Commit, Push 및 워커 루프 제어를 담당하는 패키지
+* **`internal/controller/`**: revision 기반 Repository Model, 제한된 plain/Kustomize resolver, impact, atomic ChangeSet 및 최소 scalar mutation
+* **`internal/singlewriter/`**: DB/workspace의 서버 중복 실행을 막는 OS lock
 * **`internal/yaml/`**: YAML 구조를 파싱하고 지정된 경로(`spec.template.spec.containers[0].image` 등)를 업데이트하는 유틸리티 패키지
 
 ---

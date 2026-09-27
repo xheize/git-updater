@@ -1,5 +1,7 @@
 # API 테스트 및 점검 결과
 
+이후 구현된 [CLI MVP](cli-mvp.md)가 controller 동작의 최신 계약이다. 기존 업데이트도 semantic planner와 provider/registry validation, CAS publish를 사용하며 HEAD가 바뀐 오래된 retry는 새 intent가 필요하다. 아래 기록의 generic YAML updater, strict CAS/registry 미구현 및 fixture 수정 후 동일 작업 retry 성공 설명은 이전 버전에 해당한다.
+
 최초 점검일: 2026-09-27. 최초 production 코드 기준: `6ec8a6a`. 아래 1–5절은 수정 전 점검 증거를 보존한 기록이다. 이후 결함 수정과 현재 동작은 다음 표를 기준으로 한다.
 
 ## 결함 수정 후 확인 — 2026-09-27

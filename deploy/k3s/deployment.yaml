@@ -30,7 +30,7 @@ spec:
           image: registry.xheize.cc/git-updater:REPLACE_WITH_REVIEWED_TAG
           imagePullPolicy: IfNotPresent
           command: [/app/git-updater]
-          # Keep the clone below the mount root: startup may remove ./workspace.
+          # Controller-owned clone and OS lock live below this writable mount.
           workingDir: /work
           ports:
             - name: http

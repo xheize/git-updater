@@ -491,6 +491,8 @@ domain은 Fiber, go-git, yaml.Node, SQLite에 의존하지 않는다. yaml.Node�
 
 ## 12. MVP와 후속 단계 / 완료 기준
 
+2026-09-27 구현 상태: [CLI MVP](cli-mvp.md)에 단일 repo/ref, 제한된 plain/Kustomize 모델, 영속 ChangeSet, GitHub/registry gate, scalar edit, CAS 및 CLI 사용법을 기록했다. 아래 표는 전체 목표 로드맵이며 완료 목록이 아니다. 사용자의 후속 결정으로 웹 UI는 현재 구현에서 제외했다.
+
 | 단계 | 범위 | 완료 기준 |
 |---|---|---|
 | 0: 기존 updater 정확성 | revision-bound index, workspace identity binding, typed outcomes, digest 처리·늦은 retry 방지 | 새 manifest를 fetch한 작업이 빠짐없이 반영되며 다른 repo workspace를 재사용하지 않음 |
