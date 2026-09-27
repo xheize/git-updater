@@ -4,6 +4,7 @@ package controller
 
 import (
 	"bytes"
+	_ "crypto/sha256"
 	"fmt"
 	"io"
 	"path"
@@ -66,11 +67,12 @@ type kustomization struct {
 	root *yaml.Node
 }
 type parser struct {
-	model      Model
-	files      map[string]string
-	plain      map[string][]Use
-	ks         map[string]kustomization
-	referenced map[string]bool
+	resolutions int
+	model       Model
+	files       map[string]string
+	plain       map[string][]Use
+	ks          map[string]kustomization
+	referenced  map[string]bool
 }
 
 // Parse supports built-in pod-spec locations and local resources/images-only
@@ -191,6 +193,19 @@ func Parse(revision string, files map[string]string) Model {
 		a, b := p.model.Diagnostics[i], p.model.Diagnostics[j]
 		return a.File+a.Code+a.Message < b.File+b.Code+b.Message
 	})
+	resources := map[string]Resource{}
+	for _, r := range p.model.Resources {
+		resources[r.ID] = r
+	}
+	identities := map[string]string{}
+	for _, u := range p.model.Uses {
+		r := resources[u.Resource]
+		key := u.Environment + "|" + r.Kind + "|" + r.Namespace + "|" + r.Name
+		if previous, ok := identities[key]; ok && previous != r.ID {
+			p.problem(r.File, "duplicate_workload", "Multiple resources have the same workload identity in "+u.Environment)
+		}
+		identities[key] = r.ID
+	}
 	return p.model
 }
 func (p *parser) problem(file, code, msg string) {
@@ -252,6 +267,10 @@ func (p *parser) resource(file string, doc int, n *yaml.Node, prefix string) {
 	api := value(n, "apiVersion")
 	if kind == "List" && api == "v1" {
 		items := fieldNode(n, "items")
+		if items != nil && items.Kind != yaml.SequenceNode {
+			p.problem(file, "invalid_list", "List.items must be a sequence")
+			return
+		}
 		if items != nil {
 			for i, item := range items.Content {
 				p.resource(file, doc, item, fmt.Sprintf("%s/items/%d", prefix, i))
@@ -280,6 +299,10 @@ func (p *parser) resource(file string, doc int, n *yaml.Node, prefix string) {
 		return
 	}
 	spec := at(n, keys...)
+	if value(at(n, "metadata"), "name") == "" || spec == nil || fieldNode(spec, "containers") == nil {
+		p.problem(file, "invalid_workload", "Workload requires metadata.name and a pod spec with containers")
+		return
+	}
 	for _, group := range []string{"containers", "initContainers", "ephemeralContainers"} {
 		seq := fieldNode(spec, group)
 		if seq == nil {
@@ -295,7 +318,7 @@ func (p *parser) resource(file string, doc int, n *yaml.Node, prefix string) {
 				p.problem(file, "invalid_image", "Missing container image")
 				continue
 			}
-			if _, err := reference.ParseNormalizedNamed(image.Value); err != nil {
+			if _, err := reference.ParseNormalizedNamed(image.Value); err != nil || image.Kind != yaml.ScalarNode || image.Tag != "!!str" {
 				p.problem(file, "invalid_image", "Invalid image at "+id)
 				continue
 			}
@@ -344,6 +367,11 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 	if !ok {
 		return nil
 	}
+	p.resolutions++
+	if p.resolutions > 10000 || len(stack) > 100 {
+		p.problem(k.file, "parser_limit", "Dependency graph exceeds MVP limits")
+		return nil
+	}
 	if stack[dir] {
 		p.problem(k.file, "dependency_cycle", "Kustomize dependency cycle")
 		return nil
@@ -364,9 +392,21 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 			if _, ok := p.ks[name]; ok {
 				uses = append(uses, p.resolve(name, stack)...)
 			} else if _, ok := p.files[name]; ok {
+				if dir != "." && !strings.HasPrefix(name, dir+"/") {
+					p.problem(k.file, "unsafe_dependency", "Resource files outside the Kustomization directory are not supported; reference a base directory")
+					continue
+				}
+				if path.Base(name) == "kustomization.yaml" || path.Base(name) == "kustomization.yml" || path.Base(name) == "Kustomization" {
+					p.problem(k.file, "invalid_dependency", "Reference the Kustomization directory, not its file")
+					continue
+				}
 				uses = append(uses, p.plain[name]...)
 			} else {
 				p.problem(k.file, "missing_dependency", "Missing resource or Kustomization: "+name)
+			}
+			if len(uses) > 20000 {
+				p.problem(k.file, "parser_limit", "Too many resolved image uses")
+				return nil
 			}
 		}
 	}
@@ -393,8 +433,10 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 			continue
 		}
 		name := value(ov, "name")
-		normalized := ImageName(name)
-		if normalized == "" || names[normalized] {
+		normalized := rawImageName(name)
+		parsedName, nameErr := reference.Parse(name)
+		namedName, isNamed := parsedName.(reference.Named)
+		if nameErr != nil || !isNamed || !reference.IsNameOnly(namedName) || normalized == "" || names[normalized] {
 			p.problem(k.file, "ambiguous_override", "Invalid or duplicate images.name")
 			continue
 		}
@@ -408,7 +450,11 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 		}
 		for j := range uses {
 			u := &uses[j]
-			if ImageName(u.EffectiveImage) != normalized {
+			if rawImageName(u.EffectiveImage) != normalized {
+				continue
+			}
+			if strings.Contains(u.EffectiveImage, "@") {
+				p.problem(k.file, "unsupported_digest_override", "Kustomize digest transformation is not supported")
 				continue
 			}
 			if nn := value(ov, "newName"); nn != "" {
@@ -422,8 +468,14 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 				if tag != "" {
 					u.EffectiveImage = withTag(nn, tag)
 				}
+				node := fieldNode(ov, "newName")
+				u.Overrides = append(append([]Location{}, u.Overrides...), Location{k.file, 0, fmt.Sprintf("/images/%d/newName", i), node.Line, node.Column, node.Value, false})
 			}
 			if tag := fieldNode(ov, "newTag"); tag != nil {
+				if tag.Kind != yaml.ScalarNode || tag.Tag != "!!str" {
+					p.problem(k.file, "invalid_override", "newTag must be a string scalar")
+					continue
+				}
 				u.EffectiveImage = withTag(u.EffectiveImage, tag.Value)
 				loc := Location{k.file, 0, fmt.Sprintf("/images/%d/newTag", i), tag.Line, tag.Column, tag.Value, true}
 				u.Target = loc
@@ -435,6 +487,17 @@ func (p *parser) resolve(dir string, stack map[string]bool) []Use {
 		}
 	}
 	return uses
+}
+
+func rawImageName(raw string) string {
+	r, err := reference.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if n, ok := r.(reference.Named); ok {
+		return n.Name()
+	}
+	return ""
 }
 
 // scalarSpan is deliberately conservative: single-line plain/quoted scalars

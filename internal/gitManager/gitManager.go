@@ -27,6 +27,7 @@ import (
 	gitssh "github.com/go-git/go-git/v6/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v6/plumbing/transport/ssh/knownhosts"
 	sshconfig "github.com/kevinburke/ssh_config"
+	"github.com/xheize/git-updater/internal/controller"
 	internalYaml "github.com/xheize/git-updater/internal/yaml"
 )
 
@@ -54,6 +55,7 @@ type gitManager struct {
 	jobStore     *JobStore
 	imageToFiles map[string][]string
 	mu           sync.Mutex
+	operationMu  sync.Mutex
 }
 
 type Job struct {
@@ -75,6 +77,13 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 	gitAuthMethod := os.Getenv("GIT_AUTH_METHOD")
 	repoUrl = normalizeGitURL(_repoURL, gitAuthMethod)
 	workspace := "./workspace"
+	targetBranch := strings.TrimSpace(os.Getenv("GIT_TARGET_BRANCH"))
+	if targetBranch != "" {
+		if err := plumbing.NewBranchReferenceName(targetBranch).Validate(); err != nil {
+			log.Print("Invalid GIT_TARGET_BRANCH")
+			return nil
+		}
+	}
 	log.Printf("repoUrl: %s\n", repoUrl)
 	log.Printf("workspace: %s\n", workspace)
 
@@ -93,6 +102,18 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 	var gitRepo *git.Repository
 	gitRepo, err = git.PlainOpen(workspace)
 	if err == nil {
+		origin, originErr := gitRepo.Remote("origin")
+		if originErr != nil || len(origin.Config().URLs) != 1 || origin.Config().URLs[0] != repoUrl {
+			log.Print("Existing workspace origin does not match configured repository; refusing reuse")
+			return nil
+		}
+		if targetBranch != "" {
+			head, err := gitRepo.Head()
+			if err != nil || head.Name() != plumbing.NewBranchReferenceName(targetBranch) {
+				log.Print("Workspace branch differs from GIT_TARGET_BRANCH; use a separate workspace")
+				return nil
+			}
+		}
 		log.Printf("Workspace exists. Opened existing repository.\n")
 		manager := &gitManager{
 			repoURL:      repoUrl,
@@ -107,27 +128,32 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 		syncErr := manager.syncRepository()
 		if syncErr == nil {
 			log.Printf("Initial repository sync success!\n")
-			if err := manager.buildImageMapping(); err != nil {
-				log.Printf("Failed to build image mapping: %v\n", err)
-			}
 			return manager
 		}
-		log.Printf("Initial sync failed: %v. Re-creating workspace.\n", syncErr)
+		log.Printf("Initial sync failed: %v; preserving workspace.\n", syncErr)
+		return nil
 	}
 
-	if removeErr := os.RemoveAll(workspace); removeErr != nil {
-		log.Println("Failed to clear workspace directory:", removeErr)
-		return nil
+	if _, statErr := os.Stat(workspace); !os.IsNotExist(statErr) {
+		entries, readErr := os.ReadDir(workspace)
+		if readErr != nil || len(entries) != 0 {
+			log.Print("Workspace is not an empty directory or valid repository; refusing to delete it")
+			return nil
+		}
 	}
 
 	cloneCtx, cancelClone := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelClone()
-	gitRepo, err = git.PlainCloneContext(cloneCtx, workspace, &git.CloneOptions{
+	cloneOptions := &git.CloneOptions{
 		URL:               repoUrl,
 		ClientOptions:     gitAuthOptions,
 		NoCheckout:        false,
 		RecurseSubmodules: git.NoRecurseSubmodules,
-	})
+	}
+	if targetBranch != "" {
+		cloneOptions.ReferenceName = plumbing.NewBranchReferenceName(targetBranch)
+	}
+	gitRepo, err = git.PlainCloneContext(cloneCtx, workspace, cloneOptions)
 
 	if err != nil {
 		log.Println("Clone failed:", err)
@@ -144,9 +170,6 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 		authOpts:     gitAuthOptions,
 		jobStore:     jobStore,
 		imageToFiles: make(map[string][]string),
-	}
-	if err := manager.buildImageMapping(); err != nil {
-		log.Printf("Failed to build image mapping: %v\n", err)
 	}
 	return manager
 }
@@ -270,6 +293,31 @@ func loadSSHKnownHosts(knownHostsFile string) (*knownhosts.HostKeyDB, error) {
 }
 
 func (g *gitManager) syncRepository() error {
+	// Check the live ref explicitly: a deleted branch must not leave an old
+	// remote-tracking ref looking like the current desired state.
+	branch, err := g.BranchName()
+	if err != nil {
+		return err
+	}
+	remote, err := g.repo.Remote("origin")
+	if err != nil {
+		return err
+	}
+	listCtx, cancelList := context.WithTimeout(context.Background(), 30*time.Second)
+	refs, err := remote.ListContext(listCtx, &git.ListOptions{ClientOptions: g.authOpts})
+	cancelList()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, ref := range refs {
+		if ref.Name() == plumbing.NewBranchReferenceName(branch) {
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("target branch no longer exists")
+	}
 	w, err := g.repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
@@ -371,13 +419,11 @@ func (g *gitManager) StartWorker(ctx context.Context) <-chan struct{} {
 
 func (g *gitManager) processClaimedJob(job Job) {
 	if job.Action == JobActionSync {
+		g.operationMu.Lock()
+		defer g.operationMu.Unlock()
 		log.Printf("Synchronizing workspace for GitHub push job %s\n", job.ID)
 		if err := g.syncRepository(); err != nil {
 			g.markJobFailed(job.ID, fmt.Sprintf("workspace synchronization failed: %v", err))
-			return
-		}
-		if err := g.buildImageMapping(); err != nil {
-			g.markJobFailed(job.ID, fmt.Sprintf("rebuild image mapping after synchronization failed: %v", err))
 			return
 		}
 		if err := g.jobStore.MarkCompleted(job.ID, OutcomeSynchronized); err != nil {
@@ -412,6 +458,12 @@ func (g *gitManager) processClaimedJob(job Job) {
 		return
 	}
 	log.Printf("Job %s failed: %v", job.ID, err)
+	if errors.Is(err, controller.ErrConflict) {
+		if storeErr := g.jobStore.markOutcome(job.ID, jobStatusFailed, OutcomeConflict, err.Error(), 0); storeErr != nil {
+			log.Printf("Failed to record conflict: %v", storeErr)
+		}
+		return
+	}
 	g.markJobFailed(job.ID, "Git update failed; inspect server logs for details")
 }
 
@@ -426,91 +478,14 @@ func (g *gitManager) Work(job Job) bool {
 	return err == nil && outcome != OutcomeNoMatch
 }
 
-func (g *gitManager) work(job Job) (JobOutcome, error) {
-	if err := ValidateUpdateJob(job); err != nil {
-		return "", err
-	}
-	// Sync workspace with remote branch before reading
-	if err := g.syncRepository(); err != nil {
-		return "", fmt.Errorf("sync before update: %w", err)
-	}
-
-	var filesToUpdate []string
-	baseImage := getBaseImageName(job.Image)
-
-	if job.File != "" {
-		filesToUpdate = []string{job.File}
-	} else {
-		// Never decide no_match or mutation targets from an older revision.
-		if err := g.buildImageMapping(); err != nil {
-			return "", fmt.Errorf("index current revision: %w", err)
-		}
-		g.mu.Lock()
-		filesToUpdate = g.imageToFiles[baseImage]
-		g.mu.Unlock()
-		if len(filesToUpdate) == 0 {
-			log.Printf("Job %s skipped: no files found in repository referencing image %s\n", job.ID, baseImage)
-			return OutcomeNoMatch, nil
-		}
-	}
-
-	var updatedFiles []string
-	matched := false
-	for _, relPath := range filesToUpdate {
-		filePath, safeRelPath, err := resolveWorkspaceFile(g.workspace, relPath)
-		if err != nil {
-			return "", fmt.Errorf("resolve update path: %w", err)
-		}
-
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return "", fmt.Errorf("read update file: %w", err)
-		}
-
-		updatedData, found, updated, err := internalYaml.ProcessYAMLImageUpdateResult(data, baseImage, job.Tag)
-		if err != nil {
-			return "", fmt.Errorf("parse/update file: %w", err)
-		}
-		matched = matched || found
-
-		if updated {
-			if err := os.WriteFile(filePath, updatedData, 0644); err != nil {
-				return "", fmt.Errorf("write update file: %w", err)
-			}
-			updatedFiles = append(updatedFiles, safeRelPath)
-		}
-	}
-
-	if len(updatedFiles) == 0 {
-		log.Printf("Job %s completed: no files were actually modified.\n", job.ID)
-		if !matched {
-			return OutcomeNoMatch, nil
-		}
-		return OutcomeAlreadySatisfied, nil
-	}
-
-	commitMessage := fmt.Sprintf("Update image %s:%s in %d files", baseImage, job.Tag, len(updatedFiles))
-	if job.File != "" {
-		commitMessage = fmt.Sprintf("Update image %s:%s in %s", baseImage, job.Tag, job.File)
-	}
-
-	if !g.addCommitPush(updatedFiles, commitMessage) {
-		return "", errors.New("commit/push failed")
-	}
-
-	// Rebuild in-memory mapping after push
-	if err := g.buildImageMapping(); err != nil {
-		log.Printf("Failed to rebuild image mapping after update: %v\n", err)
-	}
-
-	return OutcomePublished, nil
-}
-
 // resolveWorkspaceFile returns an existing YAML file only when every path
 // component is inside workspace and none of those components is a symlink.
 // The latter is important because a repository-controlled symlink can make a
 // lexically safe path resolve outside the workspace.
 func resolveWorkspaceFile(workspace, requestedPath string) (string, string, error) {
+	if err := ValidateUpdatePath(filepath.ToSlash(requestedPath)); err != nil {
+		return "", "", err
+	}
 	if requestedPath == "" {
 		return "", "", errors.New("file path is empty")
 	}
@@ -554,37 +529,6 @@ func resolveWorkspaceFile(workspace, requestedPath string) (string, string, erro
 	}
 
 	return filePath, relativePath, nil
-}
-
-func (g *gitManager) addCommitPush(files []string, commitMessage string) bool {
-	w, err := g.repo.Worktree()
-	if err != nil {
-		log.Printf("Failed to get worktree: %v\n", err)
-		return false
-	}
-
-	for _, file := range files {
-		if _, err := w.Add(file); err != nil {
-			log.Printf("Git add failed for %s: %v\n", file, err)
-			return false
-		}
-	}
-
-	_, err = w.Commit(commitMessage, &git.CommitOptions{Author: commitAuthor()})
-	if err != nil {
-		log.Printf("Git commit failed: %v\n", err)
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := g.repo.PushContext(ctx, &git.PushOptions{
-		ClientOptions: g.authOpts,
-	}); err != nil {
-		log.Printf("Git push failed: %v\n", err)
-		return false
-	}
-	return true
 }
 
 func commitAuthor() *object.Signature {

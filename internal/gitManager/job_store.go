@@ -39,6 +39,7 @@ const (
 	OutcomeSkippedPolicy    JobOutcome = "skipped_policy"
 	OutcomeSynchronized     JobOutcome = "synchronized"
 	OutcomeInvalidRequest   JobOutcome = "invalid_request"
+	OutcomeConflict         JobOutcome = "conflict"
 )
 
 // JobStore persists jobs so that accepted work is not lost when the process
@@ -150,7 +151,10 @@ func (s *JobStore) initialize() error {
 			return fmt.Errorf("initialize job database: %w", err)
 		}
 	}
-	return s.ensureColumns()
+	if err := s.ensureColumns(); err != nil {
+		return err
+	}
+	return s.initController()
 }
 
 func (s *JobStore) ensureColumns() error {
@@ -445,7 +449,7 @@ func (s *JobStore) Retry(id string) (Job, bool, error) {
 	if err != nil || !found {
 		return Job{}, found, err
 	}
-	if info.Status != jobStatusFailed {
+	if info.Status != jobStatusFailed || info.Outcome == OutcomeConflict {
 		return Job{}, true, ErrJobStateConflict
 	}
 

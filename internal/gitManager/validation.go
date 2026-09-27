@@ -38,7 +38,7 @@ func ValidateUpdatePath(file string) error {
 		return errors.New("file must be a repository-relative path using forward slashes")
 	}
 	for _, part := range strings.Split(file, "/") {
-		if part == ".." || strings.EqualFold(part, ".git") {
+		if part == ".." || strings.EqualFold(strings.TrimRight(part, " ."), ".git") {
 			return errors.New("file must not traverse parent directories or Git metadata")
 		}
 	}

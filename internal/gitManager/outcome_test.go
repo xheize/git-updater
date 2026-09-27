@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 )
 
 func TestWorkerOutcomes(t *testing.T) {
-	g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n"})
+	g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old")})
 	for _, tc := range []struct {
 		id, image, file, status string
 		outcome                 JobOutcome
@@ -42,7 +43,7 @@ func TestWorkerOutcomes(t *testing.T) {
 }
 
 func TestWorkReindexesFetchedImageOccurrences(t *testing.T) {
-	g := newWorkTestManager(t, map[string]string{"old.yaml": "image: nginx:old\n"})
+	g := newWorkTestManager(t, map[string]string{"old.yaml": workload("nginx:old")})
 	if err := g.buildImageMapping(); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestWorkReindexesFetchedImageOccurrences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, "added.yaml"), []byte("image: nginx:old\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "added.yaml"), []byte(strings.ReplaceAll(workload("nginx:old"), "name: api", "name: added")), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := wt.Add("added.yaml"); err != nil {
@@ -74,7 +75,7 @@ func TestWorkReindexesFetchedImageOccurrences(t *testing.T) {
 	}
 	for _, name := range []string{"old.yaml", "added.yaml"} {
 		data, err := os.ReadFile(filepath.Join(g.workspace, name))
-		if err != nil || string(data) != "image: nginx:new\n" {
+		if err != nil || !strings.Contains(string(data), "image: nginx:new") {
 			t.Fatalf("%s: %s %v", name, data, err)
 		}
 	}
@@ -82,6 +83,7 @@ func TestWorkReindexesFetchedImageOccurrences(t *testing.T) {
 
 func TestIncompleteIndexDoesNotReportNoMatch(t *testing.T) {
 	g := newWorkTestManager(t, map[string]string{"broken.yaml": "image: [\n"})
+	t.Setenv("AUTOMATION_ENVIRONMENTS", "dev")
 	info := runWorkTestJob(t, g, Job{ID: "incomplete", Image: "nginx", Tag: "new"})
 	if info.Status != jobStatusRetrying || info.Outcome == OutcomeNoMatch {
 		t.Fatalf("incomplete index treated as no match: %+v", info)

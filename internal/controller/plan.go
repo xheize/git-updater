@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/distribution/reference"
+	"gopkg.in/yaml.v3"
 )
 
 var ErrInvalid = errors.New("invalid change")
 var ErrConflict = errors.New("plan conflict; create and review a new intent")
 var ErrNotFound = errors.New("not found")
+var ErrNoMatch = errors.New("no matching workload image")
 
 type Change struct {
 	Image        string   `json:"image"`
@@ -62,6 +65,7 @@ type Plan struct {
 	Identity     Identity   `json:"identity"`
 	BaseRevision string     `json:"baseRevision"`
 	Branch       string     `json:"branch"`
+	Scope        string     `json:"scope"`
 	Atomic       bool       `json:"atomic"`
 	Mutations    []Mutation `json:"mutations"`
 	Impact       []Impact   `json:"impact"`
@@ -74,8 +78,8 @@ type Plan struct {
 }
 
 func ValidateIntent(in Intent) error {
-	if len(in.ID) < 1 || len(in.ID) > 160 {
-		return fmt.Errorf("%w: id must contain 1-160 characters", ErrInvalid)
+	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$`).MatchString(in.ID) {
+		return fmt.Errorf("%w: id must contain 1-160 letters, digits, dots, underscores, colons or hyphens", ErrInvalid)
 	}
 	if len(in.Changes) < 1 || len(in.Changes) > 100 {
 		return fmt.Errorf("%w: provide 1-100 image changes", ErrInvalid)
@@ -155,7 +159,7 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 			targets[tk] = mutation
 		}
 		if !found {
-			return p, fmt.Errorf("%w: no matching workload image %s", ErrInvalid, c.Image)
+			return p, fmt.Errorf("%w: %s", ErrNoMatch, c.Image)
 		}
 		for _, env := range c.Environments {
 			if !envFound[env] {
@@ -185,6 +189,7 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 		return p, fmt.Errorf("%w: proposed repository failed parsing", ErrInvalid)
 	}
 	afterUses := map[string]Use{}
+	artifacts := map[string]Artifact{}
 	for _, u := range after.Uses {
 		afterUses[useKey(u)] = u
 	}
@@ -200,10 +205,20 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 		if u.EffectiveImage != want {
 			return p, fmt.Errorf("%w: unexpected rendered impact in %s", ErrInvalid, before.Environment)
 		}
+		if selected {
+			a := Artifact{Image: ImageName(u.EffectiveImage), Tag: ImageTag(u.EffectiveImage)}
+			artifacts[a.Image+":"+a.Tag] = a
+		}
 		if u.EffectiveImage != before.EffectiveImage {
 			p.Impact = append(p.Impact, Impact{before.Resource, before.Container, before.Environment, before.EffectiveImage, u.EffectiveImage, before.Target})
 		}
 	}
+	for _, a := range artifacts {
+		p.Artifacts = append(p.Artifacts, a)
+	}
+	sort.Slice(p.Artifacts, func(i, j int) bool {
+		return p.Artifacts[i].Image+":"+p.Artifacts[i].Tag < p.Artifacts[j].Image+":"+p.Artifacts[j].Tag
+	})
 	for _, f := range model.Files {
 		if files[f] != changed[f] {
 			p.Diffs = append(p.Diffs, FileDiff{f, unified(f, files[f], changed[f])})
@@ -238,6 +253,12 @@ func Apply(files map[string]string, mutations []Mutation) (map[string]string, er
 		case '"':
 			b, _ := json.Marshal(text)
 			text = string(b)
+		default:
+			var scalar yaml.Node
+			if err := yaml.Unmarshal([]byte(text), &scalar); err != nil || len(scalar.Content) != 1 || scalar.Content[0].Kind != yaml.ScalarNode || scalar.Content[0].Tag != "!!str" || scalar.Content[0].Value != text {
+				b, _ := json.Marshal(text)
+				text = string(b)
+			}
 		}
 		edits[m.Location.File] = append(edits[m.Location.File], edit{start, end, text})
 	}

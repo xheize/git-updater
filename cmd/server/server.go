@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/xheize/git-updater/internal/gitManager"
+	"github.com/xheize/git-updater/internal/singlewriter"
 )
 
 func main() {
@@ -27,6 +28,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid server configuration: %w", err)
 	}
+	releaseDB, err := singlewriter.Acquire(cfg.databasePath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer releaseDB()
+	releaseWorkspace, err := singlewriter.Acquire("./workspace.lock")
+	if err != nil {
+		return err
+	}
+	defer releaseWorkspace()
 	store, err := gitManager.NewSQLiteJobStore(cfg.databasePath)
 	if err != nil {
 		return err
@@ -54,6 +65,7 @@ func run() error {
 	app.Use(recover.New())
 	setupHealthRoutes(app, ctx, workerDone, store)
 	setupRoutes(app, queue, store, branch, cfg)
+	setupControllerRoutes(app, manager, store, cfg.apiKey)
 	if !cfg.githubEnabled {
 		log.Print("GitHub webhook endpoint disabled; configure GITHUB_WEBHOOK_SECRET to enable it")
 	}

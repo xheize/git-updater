@@ -14,6 +14,9 @@ import (
 
 func newWorkTestManager(t *testing.T, files map[string]string) *gitManager {
 	t.Helper()
+	t.Setenv("CONTROLLER_LOCAL_MODE", "true")
+	t.Setenv("GITOPS_PATH", "")
+	t.Setenv("AUTOMATION_ENVIRONMENTS", "")
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	repo, err := git.PlainInit(origin, false)
@@ -25,6 +28,9 @@ func newWorkTestManager(t *testing.T, files map[string]string) *gitManager {
 		t.Fatal(err)
 	}
 	for name, content := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(origin, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(origin, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +65,7 @@ func TestCommitAuthorWithoutGitConfig(t *testing.T) {
 				t.Setenv("GIT_AUTHOR_NAME", name)
 				t.Setenv("GIT_AUTHOR_EMAIL", email)
 			}
-			g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n"})
+			g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old")})
 			if !g.Work(Job{ID: "author", File: "app.yaml", Image: "nginx", Tag: "new"}) {
 				t.Fatal("update failed")
 			}
@@ -79,7 +85,7 @@ func TestCommitAuthorWithoutGitConfig(t *testing.T) {
 }
 
 func TestWorkerShutdownPreservesPendingJob(t *testing.T) {
-	g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n"})
+	g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old")})
 	if _, err := g.jobStore.Enqueue(Job{ID: "pending", Image: "nginx", Tag: "new", Timestamp: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +123,7 @@ func runWorkTestJob(t *testing.T, g *gitManager, job Job) JobInfo {
 func TestWorkFileErrorsAreRetried(t *testing.T) {
 	for _, file := range []string{"missing.yaml", "broken.yaml", "directory.yaml"} {
 		t.Run(file, func(t *testing.T) {
-			g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n", "broken.yaml": "image: [\n"})
+			g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old"), "broken.yaml": "image: [\n"})
 			if err := os.Mkdir(filepath.Join(g.workspace, "directory.yaml"), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -130,7 +136,7 @@ func TestWorkFileErrorsAreRetried(t *testing.T) {
 }
 
 func TestWorkDoesNotCommitPartialUpdate(t *testing.T) {
-	g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n", "broken.yaml": "image: [\n"})
+	g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old"), "broken.yaml": "image: [\n"})
 	g.imageToFiles = map[string][]string{"nginx": {"app.yaml", "broken.yaml"}}
 	before, err := g.repo.Head()
 	if err != nil {
@@ -150,7 +156,7 @@ func TestWorkDoesNotCommitPartialUpdate(t *testing.T) {
 }
 
 func TestWorkDuplicateUpdateSucceedsWithoutCommit(t *testing.T) {
-	g := newWorkTestManager(t, map[string]string{"app.yaml": "image: nginx:old\n"})
+	g := newWorkTestManager(t, map[string]string{"app.yaml": workload("nginx:old")})
 	for _, id := range []string{"first", "duplicate"} {
 		before, err := g.repo.Head()
 		if err != nil {
@@ -171,4 +177,8 @@ func TestWorkDuplicateUpdateSucceedsWithoutCommit(t *testing.T) {
 			t.Fatal("initial update did not create a commit")
 		}
 	}
+}
+
+func workload(image string) string {
+	return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n      - name: api\n        image: " + image + "\n"
 }

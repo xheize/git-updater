@@ -28,6 +28,11 @@ go.work.sum
 .env
 .env.*
 
+# Controller-owned runtime state
+/workspace/
+/workspace.lock
+/data/
+
 # Editor/IDE
 # .idea/
 # .vscode/

@@ -95,3 +95,43 @@ func TestCRLFUnicodeQuotesAndDigest(t *testing.T) {
 		t.Fatal("digest silently dropped")
 	}
 }
+
+func TestRenamedImageValidatesEffectiveArtifact(t *testing.T) {
+	files := map[string]string{"a.yaml": deployment("nginx:v1"), "kustomization.yaml": "resources: [a.yaml]\nimages:\n- name: nginx\n  newName: mirror.test/team/api\n  newTag: v2\n"}
+	m := Parse("abc", files)
+	p, err := BuildPlan(m, files, Intent{"rename", []Change{{Image: "nginx", Tag: "v3"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Artifacts) != 1 || p.Artifacts[0].Image != "mirror.test/team/api" || p.Artifacts[0].Tag != "v3" || len(m.Uses[0].Overrides) != 2 {
+		t.Fatalf("%+v %+v", p, m.Uses)
+	}
+}
+
+func TestNumericTagRemainsYAMLString(t *testing.T) {
+	files := map[string]string{"a.yaml": deployment("nginx:v1"), "kustomization.yaml": "resources: [a.yaml]\nimages:\n- name: nginx\n  newTag: v2 # keep\n"}
+	p, err := BuildPlan(Parse("abc", files), files, Intent{"numeric", []Change{{Image: "nginx", Tag: "20260927"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := Apply(files, p.Mutations)
+	if !strings.Contains(after["kustomization.yaml"], `newTag: "20260927" # keep`) {
+		t.Fatal(after)
+	}
+}
+
+func TestListCronJobAndInitContainers(t *testing.T) {
+	files := map[string]string{"jobs.yaml": "apiVersion: v1\nkind: List\nitems:\n- apiVersion: batch/v1\n  kind: CronJob\n  metadata: {name: tick}\n  spec:\n    jobTemplate:\n      spec:\n        template:\n          spec:\n            containers: [{name: job, image: 'busybox:v1'}]\n            initContainers: [{name: init, image: 'alpine:v1'}]\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: literal}\ndata: {image: 'busybox:v1'}\n"}
+	m := Parse("abc", files)
+	p, err := BuildPlan(m, files, Intent{"multi", []Change{{Image: "busybox", Tag: "v2"}, {Image: "alpine", Tag: "v3"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := Apply(files, p.Mutations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Mutations) != 2 || !strings.Contains(after["jobs.yaml"], "data: {image: 'busybox:v1'}") {
+		t.Fatal("container locations or ConfigMap exclusion failed")
+	}
+}
