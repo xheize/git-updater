@@ -150,3 +150,27 @@ go vet ./...
 후속 범위는 웹 UI, Helm explicit bindings, 전체 Kustomize/native render 검증, PR/approval 역할 분리, GitLab/Enterprise providers, registry token negotiation, digest mutation, multi-repo release 및 HA다.
 
 검증 프로토콜 근거: [GitHub repository API](https://docs.github.com/en/rest/repos/repos#get-a-repository), [OCI manifest 존재 확인](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#checking-if-content-exists-in-the-registry), [Kustomize image transformation](https://github.com/kubernetes-sigs/kustomize/blob/master/api/filters/imagetag/updater.go).
+
+## Server and CLI container images
+
+The default Docker build (target `server`) contains only `/app/git-updater`.
+The `cli` target contains only `/app/git-updater-cli` and runs as a one-shot API client.
+Both run as UID 100 / GID 101. Binary ownership is set by `COPY --chown`, avoiding
+an additional recursive ownership-change layer containing the binaries.
+
+```sh
+docker build -t git-updater:local .
+docker build --target cli -t git-updater-cli:local .
+docker run --rm git-updater-cli:local help
+# Set these variables in the calling shell; do not put credentials in image layers.
+# The URL must be reachable from the CLI container (localhost refers to itself).
+docker run --rm -e GIT_UPDATER_SERVER_URL -e GIT_UPDATER_API_KEY git-updater-cli:local inspect
+```
+
+CI publishes the server to `registry.xheize.cc/git-updater` and the CLI to
+`registry.xheize.cc/git-updater-cli`, with matching `nightly-<sha8>` / `nightly`
+and Git-tag / `latest` tags. The CLI does not need a persistent Deployment.
+After adopting this server image, `kubectl exec ... /app/git-updater-cli` is no
+longer available. Use a local CLI through port-forwarding or a separate CLI
+container with API credentials supplied at runtime. Existing cluster deployment
+manifests and pinned images are not changed by this image-layout change.
