@@ -504,11 +504,6 @@ func resolveWorkspaceFile(workspace, requestedPath string) (string, string, erro
 		return "", "", errors.New("path escapes the workspace")
 	}
 
-	ext := strings.ToLower(filepath.Ext(cleanPath))
-	if ext != ".yaml" && ext != ".yml" {
-		return "", "", errors.New("only YAML files can be updated")
-	}
-
 	workspacePath, err := filepath.Abs(workspace)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve workspace path: %w", err)

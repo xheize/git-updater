@@ -6,6 +6,11 @@ import (
 )
 
 func TestValidateUpdateJob(t *testing.T) {
+	for _, file := range []string{"Kustomization", "apps/Kustomization", "apps/kustomization.yaml", "apps/kustomization.yml"} {
+		if err := ValidateUpdateJob(Job{Image: "nginx", Tag: "v2", File: file}); err != nil {
+			t.Errorf("valid Kustomization path %q: %v", file, err)
+		}
+	}
 	for _, image := range []string{"nginx", "ghcr.io/foo/api", "registry.test:5000/team/api", "[::1]:5000/api"} {
 		if err := ValidateUpdateJob(Job{Image: image, Tag: "v1.2.3-rc_1", File: "apps/api.yaml"}); err != nil {
 			t.Errorf("valid image %q: %v", image, err)
@@ -21,7 +26,7 @@ func TestValidateUpdateJob(t *testing.T) {
 			t.Errorf("accepted invalid job: %+v", job)
 		}
 	}
-	for _, file := range []string{"../app.yaml", "apps/../app.yaml", "/app.yaml", "C:/app.yaml", "C:app.yaml", "app.yaml:stream", `..\app.yaml`, ".git/config.yaml", "app.txt", "app.yaml\x00", " "} {
+	for _, file := range []string{"../app.yaml", "apps/../app.yaml", "/app.yaml", "C:/app.yaml", "C:app.yaml", "app.yaml:stream", `..\app.yaml`, ".git/config.yaml", "app.txt", "app.yaml\x00", " ", "../Kustomization", "/Kustomization", ".git/Kustomization", "apps/.git/Kustomization", "apps/kustomization", "apps/Kustomization.txt"} {
 		if err := ValidateUpdateJob(Job{Image: "nginx", Tag: "v1", File: file}); err == nil {
 			t.Errorf("accepted invalid file %q", file)
 		}

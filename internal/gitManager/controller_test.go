@@ -280,6 +280,55 @@ func TestPreviewRejectsRemoteChangeAfterBaselineCheck(t *testing.T) {
 	}
 }
 
+func TestKustomizationFilenamePublish(t *testing.T) {
+	for _, name := range []string{"Kustomization", "kustomization.yaml", "kustomization.yml"} {
+		t.Run(name, func(t *testing.T) {
+			original := workload("nginx:v1")
+			g := newWorkTestManager(t, map[string]string{
+				"app.yaml": original,
+				name:       "resources: [app.yaml]\nimages:\n- name: nginx\n  newTag: v1 # keep\n",
+			})
+			p, err := g.Preview(context.Background(), controller.Intent{ID: "kustomization", Changes: []controller.Change{{Image: "nginx", Tag: "v2", File: name}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Mutations) != 1 || p.Mutations[0].Location.File != name {
+				t.Fatalf("unexpected mutations: %+v", p.Mutations)
+			}
+			p, err = g.ApplyPlan(context.Background(), p.ID)
+			if err != nil || p.State != "published" {
+				t.Fatalf("apply: %+v %v", p, err)
+			}
+			raw, err := g.originURL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			origin, err := git.PlainOpen(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			head, err := origin.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			commit, err := origin.CommitObject(head.Hash())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for file, want := range map[string]string{name: "resources: [app.yaml]\nimages:\n- name: nginx\n  newTag: v2 # keep\n", "app.yaml": original} {
+				f, err := commit.File(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := f.Contents()
+				if err != nil || got != want {
+					t.Fatalf("published %s: %q, %v", file, got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestPublishRequiresExactRemoteRefEvenAfterRewind(t *testing.T) {
 	g := newWorkTestManager(t, map[string]string{"a.yaml": workload("nginx:v1")})
 	base, _ := g.repo.Head()

@@ -43,8 +43,8 @@ func ValidateUpdatePath(file string) error {
 		}
 	}
 	ext := strings.ToLower(path.Ext(file))
-	if ext != ".yaml" && ext != ".yml" {
-		return errors.New("file must name a YAML file")
+	if ext != ".yaml" && ext != ".yml" && path.Base(file) != "Kustomization" {
+		return errors.New("file must name a YAML file or Kustomization")
 	}
 	return nil
 }
