@@ -231,6 +231,55 @@ func TestOldJobRetryCannotRollbackNewIntent(t *testing.T) {
 		t.Fatalf("old intent retried on new HEAD: %v", err)
 	}
 }
+
+func TestPreviewRejectsRemoteChangeAfterBaselineCheck(t *testing.T) {
+	g := newWorkTestManager(t, map[string]string{"a.yaml": workload("nginx:v1")})
+	base, err := g.repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a user push between work's baseline check and preview's fetch.
+	raw, err := g.originURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, err := git.PlainOpen(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := origin.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raw, "a.yaml"), []byte(workload("nginx:v3")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("a.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	userCommit, err := wt.Commit("user update", &git.CommitOptions{Author: commitAuthor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := controller.Intent{ID: "stale-job", Changes: []controller.Change{{Image: "nginx", Tag: "v2"}}}
+	if _, err := g.preview(context.Background(), in, base.Hash().String()); !errors.Is(err, controller.ErrConflict) {
+		t.Fatalf("job rebased onto user update: %v", err)
+	}
+	if _, err := g.jobStore.GetPlan(in.ID); !errors.Is(err, controller.ErrNotFound) {
+		t.Fatalf("stale plan persisted: %v", err)
+	}
+	remoteHead, err := origin.Head()
+	if err != nil || remoteHead.Hash() != userCommit {
+		t.Fatalf("user commit changed: %v", err)
+	}
+	// A fresh intent may still use the new revision.
+	in.ID = "fresh-job"
+	p, err := g.preview(context.Background(), in, userCommit.String())
+	if err != nil || p.BaseRevision != userCommit.String() {
+		t.Fatalf("fresh baseline rejected: %+v %v", p, err)
+	}
+}
+
 func TestPublishRequiresExactRemoteRefEvenAfterRewind(t *testing.T) {
 	g := newWorkTestManager(t, map[string]string{"a.yaml": workload("nginx:v1")})
 	base, _ := g.repo.Head()

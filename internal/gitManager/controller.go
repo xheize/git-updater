@@ -139,9 +139,9 @@ func (g *gitManager) Repository(ctx context.Context) (RepositoryView, error) {
 func (g *gitManager) Preview(ctx context.Context, in controller.Intent) (controller.Plan, error) {
 	g.operationMu.Lock()
 	defer g.operationMu.Unlock()
-	return g.preview(ctx, in)
+	return g.preview(ctx, in, "")
 }
-func (g *gitManager) preview(ctx context.Context, in controller.Intent) (controller.Plan, error) {
+func (g *gitManager) preview(ctx context.Context, in controller.Intent, baseline string) (controller.Plan, error) {
 	var empty controller.Plan
 	if err := controller.ValidateIntent(in); err != nil {
 		return empty, err
@@ -159,6 +159,17 @@ func (g *gitManager) preview(ctx context.Context, in controller.Intent) (control
 	}
 	if err := g.syncRepository(); err != nil {
 		return empty, err
+	}
+	// A queued job must keep its original revision even if this second fetch
+	// observes a push made after work checked the durable baseline.
+	if baseline != "" {
+		head, err := g.repo.Head()
+		if err != nil {
+			return empty, err
+		}
+		if head.Hash().String() != baseline {
+			return empty, fmt.Errorf("%w: retry baseline changed; submit a new intent", controller.ErrConflict)
+		}
 	}
 	branch, err := g.BranchName()
 	if err != nil {
@@ -407,6 +418,7 @@ func (g *gitManager) work(job Job) (JobOutcome, error) {
 	defer cancel()
 	sum := sha256.Sum256([]byte(job.ID))
 	id := "job-" + hex.EncodeToString(sum[:])
+	var baseline string
 	if _, err := g.jobStore.GetPlan(id); errors.Is(err, controller.ErrNotFound) {
 		if _, err := g.originURL(); err != nil {
 			return "", err
@@ -421,7 +433,6 @@ func (g *gitManager) work(job Job) (JobOutcome, error) {
 		if _, err := g.jobStore.db.Exec(`INSERT INTO job_baselines(id,revision) VALUES(?,?) ON CONFLICT DO NOTHING`, job.ID, head.Hash().String()); err != nil {
 			return "", err
 		}
-		var baseline string
 		if err := g.jobStore.db.QueryRow(`SELECT revision FROM job_baselines WHERE id=?`, job.ID).Scan(&baseline); err != nil {
 			return "", err
 		}
@@ -472,7 +483,7 @@ func (g *gitManager) work(job Job) (JobOutcome, error) {
 			}
 		}
 	}
-	p, err := g.preview(ctx, controller.Intent{ID: id, Changes: []controller.Change{change}})
+	p, err := g.preview(ctx, controller.Intent{ID: id, Changes: []controller.Change{change}}, baseline)
 	if errors.Is(err, controller.ErrNoMatch) {
 		return OutcomeNoMatch, nil
 	}
