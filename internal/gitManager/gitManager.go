@@ -46,16 +46,20 @@ const (
 )
 
 type gitManager struct {
-	repoURL      string
-	repo         *git.Repository
-	jobQueue     chan Job
-	workspace    string
-	autoUpdate   bool
-	authOpts     []client.Option
-	jobStore     *JobStore
-	imageToFiles map[string][]string
-	mu           sync.Mutex
-	operationMu  sync.Mutex
+	repoURL         string
+	repo            *git.Repository
+	jobQueue        chan Job
+	workspace       string
+	autoUpdate      bool
+	authOpts        []client.Option
+	jobStore        *JobStore
+	imageToFiles    map[string][]string
+	mu              sync.Mutex
+	operationMu     sync.Mutex
+	accessOrigin    string
+	accessBranch    string
+	accessCheckedAt time.Time
+	accessError     string
 }
 
 type Job struct {
@@ -128,6 +132,7 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 		syncErr := manager.syncRepository()
 		if syncErr == nil {
 			log.Printf("Initial repository sync success!\n")
+			manager.initializeAccess()
 			return manager
 		}
 		log.Printf("Initial sync failed: %v; preserving workspace.\n", syncErr)
@@ -171,6 +176,7 @@ func New(_repoURL string, _jobQueue chan Job, jobStore *JobStore) *gitManager {
 		jobStore:     jobStore,
 		imageToFiles: make(map[string][]string),
 	}
+	manager.initializeAccess()
 	return manager
 }
 

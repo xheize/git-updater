@@ -45,14 +45,17 @@ type FileDiff struct {
 	Diff string `json:"diff"`
 }
 type Identity struct {
-	Provider      string `json:"provider"`
-	RepositoryID  string `json:"repositoryId"`
-	Name          string `json:"name"`
-	DefaultBranch string `json:"defaultBranch"`
-	Verified      bool   `json:"verified"`
-	Writable      bool   `json:"writable"`
-	Protected     bool   `json:"protected"`
-	Detail        string `json:"detail"`
+	VerificationMethod string `json:"verificationMethod,omitempty"`
+	ProtectionKnown    bool   `json:"protectionKnown"`
+	CheckedAt          string `json:"checkedAt,omitempty"`
+	Provider           string `json:"provider"`
+	RepositoryID       string `json:"repositoryId"`
+	Name               string `json:"name"`
+	DefaultBranch      string `json:"defaultBranch"`
+	Verified           bool   `json:"verified"`
+	Writable           bool   `json:"writable"`
+	Protected          bool   `json:"protected"`
+	Detail             string `json:"detail"`
 }
 type Artifact struct {
 	Image  string `json:"image"`

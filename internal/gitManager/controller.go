@@ -164,6 +164,11 @@ func (g *gitManager) preview(ctx context.Context, in controller.Intent) (control
 	if err != nil {
 		return empty, err
 	}
+	if os.Getenv("CONTROLLER_LOCAL_MODE") != "true" {
+		if err := g.ensureGitAccess(ctx, branch); err != nil {
+			return empty, err
+		}
+	}
 	identity, err := g.verifyRepository(ctx, branch)
 	if err != nil {
 		return empty, fmt.Errorf("%w: %v", controller.ErrInvalid, err)
@@ -226,6 +231,11 @@ func (g *gitManager) applyPlan(ctx context.Context, id string) (controller.Plan,
 	}
 	if p.Scope != scope {
 		return p, fmt.Errorf("%w: repository scope changed", controller.ErrConflict)
+	}
+	if os.Getenv("CONTROLLER_LOCAL_MODE") != "true" {
+		if err := g.ensureGitAccess(ctx, branch); err != nil {
+			return p, err
+		}
 	}
 	identity, err := g.verifyRepository(ctx, branch)
 	if err != nil {

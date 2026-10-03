@@ -73,7 +73,21 @@ func (g *gitManager) verifyRepository(ctx context.Context, branch string) (contr
 		token = os.Getenv("GIT_PASSWORD")
 	}
 	if token == "" {
-		return id, fmt.Errorf("GITHUB_TOKEN is required for repository verification")
+		if os.Getenv("GIT_AUTH_METHOD") != "ssh" {
+			return id, fmt.Errorf("GitHub token or verified SSH authentication is required")
+		}
+		if os.Getenv("GITHUB_REPOSITORY_ID") != "" {
+			return id, fmt.Errorf("GITHUB_TOKEN is required to validate the configured immutable repository ID")
+		}
+		// This is an origin binding, deliberately not a provider repository ID.
+		sum := sha256.Sum256([]byte(canonical))
+		id = controller.Identity{Provider: "git-ssh", RepositoryID: hex.EncodeToString(sum[:]), Name: full, VerificationMethod: "ssh-probe", ProtectionKnown: false}
+		if g.accessOrigin != raw || g.accessBranch != branch || g.accessCheckedAt.IsZero() {
+			return id, fmt.Errorf("initial Git access verification required: %s", g.accessError)
+		}
+		id.Verified, id.Writable, id.CheckedAt = true, true, g.accessCheckedAt.Format(time.RFC3339Nano)
+		id.Detail = "SSH read and temporary-ref create/delete verified; identity bound to origin URL, immutable provider ID and target branch protection unknown; final push is authoritative"
+		return id, nil
 	}
 	get := func(endpoint string, out any) error {
 		req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com"+endpoint, nil)
@@ -119,6 +133,14 @@ func (g *gitManager) verifyRepository(ctx context.Context, branch string) (contr
 		return id, err
 	}
 	id = controller.Identity{Provider: "github", RepositoryID: strconv.FormatInt(repo.ID, 10), Name: repo.FullName, DefaultBranch: repo.DefaultBranch, Verified: true, Writable: repo.Permissions.Push && !repo.Archived && !repo.Disabled && !ref.Protected, Protected: ref.Protected, Detail: "Provider identity/access verified; protected branches require a future PR workflow"}
+	id.VerificationMethod, id.ProtectionKnown = "github-api", true
+	if !g.accessCheckedAt.IsZero() {
+		id.CheckedAt = g.accessCheckedAt.Format(time.RFC3339Nano)
+	}
+	if g.accessError != "" {
+		id.Writable = false
+		id.Detail += "; Git transport verification failed: " + g.accessError
+	}
 	return id, nil
 }
 func (g *gitManager) verifyArtifact(ctx context.Context, c controller.Change) (controller.Artifact, error) {
