@@ -150,3 +150,26 @@ go vet ./...
 후속 범위는 웹 UI, Helm explicit bindings, 전체 Kustomize/native render 검증, PR/approval 역할 분리, GitLab/Enterprise providers, registry token negotiation, digest mutation, multi-repo release 및 HA다.
 
 검증 프로토콜 근거: [GitHub repository API](https://docs.github.com/en/rest/repos/repos#get-a-repository), [OCI manifest 존재 확인](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#checking-if-content-exists-in-the-registry), [Kustomize image transformation](https://github.com/kubernetes-sigs/kustomize/blob/master/api/filters/imagetag/updater.go).
+
+## Zot CloudEvents
+
+`POST /webhook/zot` accepts authenticated CloudEvents 1.0 in binary HTTP mode
+(`ce-specversion`, `ce-id`, `ce-source`, `ce-type`, optional `ce-time`) or
+structured mode (`Content-Type: application/cloudevents+json`). Zot 2.x
+`zotregistry.image.updated` events map `data.name` and `data.reference` to an
+image/tag update. Non-update events and digest-addressed uploads are ignored.
+Malformed update events return 400; missing API authentication returns 401.
+The legacy `action: push` / `target` JSON format remains supported.
+
+Set `ZOT_REGISTRY_HOST` to the registry hostname, optionally including its port,
+without a URL scheme or path. When unset, a single `REGISTRY_HOSTS` entry is used.
+Multiple allowed registries require an explicit `ZOT_REGISTRY_HOST`. CloudEvents
+`source` (e.g. `zotregistry.dev`) identifies the producer, not the image registry.
+A single endpoint configuration currently represents one Zot registry.
+
+Delivery IDs are scoped by configured registry and event source. Binary and
+structured encodings of the same event share a persisted job; reusing an ID
+with changed data/time returns 409. A 202 response means durable admission,
+not successful Git publication. AUTO_UPDATE, repository identity, parser,
+registry validation and Git concurrency checks still apply. HTTP 200 ignored
+must not be interpreted as a successful image update.
