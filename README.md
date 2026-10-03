@@ -1,175 +1,244 @@
 # git-updater
 
-현재는 **CLI 중심 GitOps Change Controller MVP**를 제공한다. `inspect` / `images` / `plan` / `apply` / `changesets`로 저장소 구조와 이미지 사용처를 확인하고, 복수 이미지 변경을 preview한 뒤 한 commit으로 게시한다. 웹 UI와 클러스터 apply 기능은 없다. **[MVP 사용법·지원 범위·필수 추가 설정](docs/cli-mvp.md)**을 먼저 확인한다. 운영 변경에는 GitHub provider 검증과 `REGISTRY_HOSTS` 및 필요한 registry 인증 설정이 추가로 필요하다.
+GitOps 저장소를 해석하고 변경 영향을 검증한 뒤, 다음 desired state를 Git commit으로 만드는 **CLI 중심 GitOps Change Controller**입니다.
 
-`git-updater`는 GitOps 파이프라인(예: ArgoCD, Flux 등)에서 컨테이너 이미지 태그 업데이트를 자동화하기 위한 도구입니다. 이 프로젝트는 이미지 업데이트 요청을 큐(Queue)를 통해 비동기로 처리하는 **API 서버**와, 이 서버에 업데이트 요청을 보낼 수 있는 **CLI 클라이언트**로 구성되어 있습니다.
-
----
-
-## 주요 기능
-
-1. **비동기 이미지 업데이트**: Webhook 요청을 받으면 내장된 작업 큐(Job Queue)에 등록하고, 단일 워커가 순차적으로 YAML 파일을 수정한 뒤 Git Commit & Push를 수행합니다.
-2. **YAML 파싱 및 보존**: `gopkg.in/yaml.v3`를 사용하여 주석(Comments)과 포맷을 유지하면서 특정 이미지 태그만 안전하게 업데이트합니다.
-3. **다양한 Git 인증 지원**: SSH Key 인증 및 HTTP Basic(Username/Password/Token) 인증을 모두 지원합니다.
-4. **경량화된 웹 프레임워크**: Fiber를 사용하여 가볍고 빠른 API 서버를 제공합니다.
-
----
-
-## 프로젝트 구조
-
-* **`cmd/server/`**: Webhook 요청을 받고 Git 워커를 구동하는 API 서버 엔트리포인트
-* **`cmd/cli/`**: 개발자 PC나 CI 파이프라인에서 API 서버로 업데이트 요청을 쉽게 보낼 수 있는 CLI 도구 엔트리포인트
-* **`internal/gitManager/`**: Git Clone, 파일 업데이트, Commit, Push 및 워커 루프 제어를 담당하는 패키지
-* **`internal/controller/`**: revision 기반 Repository Model, 제한된 plain/Kustomize resolver, impact, atomic ChangeSet 및 최소 scalar mutation
-* **`internal/singlewriter/`**: DB/workspace의 서버 중복 실행을 막는 OS lock
-* **`internal/yaml/`**: YAML 구조를 파싱하고 지정된 경로(`spec.template.spec.containers[0].image` 등)를 업데이트하는 유틸리티 패키지
-
----
-
-## 환경 변수 설정 (API 서버용)
-
-서버 실행 시 다음 환경 변수를 통해 Git 저장소 접근 권한을 설정해야 합니다.
-
-| 환경 변수명 | 필수 여부 | 설명 |
-| :--- | :--- | :--- |
-| `API_KEY` | **필수** | CLI/API/Zot 인증키. `WEBHOOK_SECRET`도 호환 지원하며 둘 다 없으면 시작 실패 |
-| `GITHUB_WEBHOOK_SECRET` | GitHub 웹훅 사용 시 필수 | HMAC 서명 검증 키. 미설정 시 GitHub 경로 비활성화 |
-| `GITHUB_REPOSITORY_ID` | GitHub 웹훅 사용 시 필수 | 설정한 Git 저장소의 GitHub numeric repository ID. 서명된 push payload의 ID와 비교 |
-| `GITHUB_WEBHOOK_ENABLED` | 선택 | 기본값은 GitHub Secret 설정 여부. `true`일 때 Secret이 없으면 시작 실패, `false`이면 경로 비활성화 |
-| `GIT_AUTH_METHOD` | **필수** | Git 인증 방식 (`ssh` 또는 `http`) |
-| `GIT_SSH_PRIVATE_KEY` | `ssh` 시 필수 | Git 인증에 사용할 SSH Private Key 내용 (String) |
-| `GIT_SSH_KNOWN_HOSTS_FILE` | `ssh` 시 **필수** | 원격 Git 서버의 공개 호스트키를 등록한 표준 `known_hosts` 파일 경로 |
-| `GIT_USERNAME` | `http` 시 필수 | HTTP Basic 인증용 Username |
-| `GIT_PASSWORD` | `http` 시 필수 | HTTP Basic 인증용 Password 또는 Personal Access Token |
-| `GIT_REPOSITORY_URL` | **필수** | 업데이트 대상 Git 저장소 주소 (`GIT_REPO_URL`도 호환 지원) |
-| `JOB_DB_PATH` | 선택 | 영속 작업 큐 SQLite DB 경로 (기본값: `./data/jobs.db`) |
-| `GIT_AUTHOR_NAME` | 선택 | 커밋 작성자 이름 (기본값: `git-updater`) |
-| `GIT_AUTHOR_EMAIL` | 선택 | 커밋 작성자 이메일 (기본값: `git-updater@localhost`) |
-| `AUTO_UPDATE` | 선택 | `true`일 때 자동 업데이트. 기본값은 비활성화이며 CLI의 강제 요청은 처리 |
-| `PORT` | 선택 | API 서버가 리스닝할 포트 (기본값: `3000`) |
-
----
-
-## 실행 및 사용법
-
-### 1. API 서버 구동하기
-
-#### 로컬 실행
-```bash
-# 환경 변수 설정 예시 (HTTP 인증)
-export GIT_AUTH_METHOD="http"
-export GIT_USERNAME="your-github-username"
-export GIT_PASSWORD="your-personal-access-token"
-export GIT_REPOSITORY_URL="https://github.com/your-org/your-repo.git"
-export API_KEY="your-api-key"
-
-# 서버 실행
-go run ./cmd/server
+```text
+CLI / API / Zot webhook
+  → Repository Model · 이미지 사용처 해석
+  → ChangeSet · 영향 분석 · 검증 · diff
+  → Git commit / 조건부 push
+  → Argo CD 등 downstream GitOps controller
+  → Cluster
 ```
 
-#### Docker로 실행
-`Dockerfile`이 이미 작성되어 있으므로 컨테이너로 패키징하여 배포할 수 있습니다.
+서버는 Kubernetes API에 접근하거나 리소스를 apply하지 않습니다. Kubernetes는 선택 가능한 실행 환경이며, VM이나 Docker에서도 사용할 수 있습니다. CLI는 서버의 HTTP API를 호출하는 클라이언트입니다. 웹 UI는 없습니다.
+
+## 현재 지원 범위
+
+| 항목 | 구현 범위 |
+|---|---|
+| 저장소 | 서버 하나당 Git 저장소 하나·브랜치 하나, `GITOPS_PATH`로 분석 범위 지정 |
+| 파서 | 알려진 Kubernetes workload의 이미지, 제한된 local Kustomize `resources` / `bases` / `images` |
+| 변경 계획 | source/effective image 구분, 수정 위치·영향 환경·diff preview |
+| ChangeSet | 여러 이미지 변경을 하나의 계획과 Git commit으로 묶기 |
+| YAML 수정 | 원문 scalar 위치만 변경하여 나머지 주석·공백·key order 보존 |
+| 검증 | GitHub repository identity·접근·브랜치 보호, registry tag·digest |
+| 동시성 | revision 고정, 원격 ref 조건부 push, stale 계획 거절 |
+| 작업 관리 | SQLite 영속 큐·계획·이력, 중복 이벤트 방지, 실패 재시도 |
+| 입력 | CLI/API, Zot CloudEvents 및 기존 Zot JSON, GitHub push 동기화 webhook |
+
+**미지원:** Helm, remote Kustomize bases, patches/generators/plugins 등 복잡한 변환, 이미지별·레포별 rule engine, PR 생성 workflow, 여러 저장소를 묶는 atomic commit, 다중 서버 운영. 선택 범위에 parser diagnostic이 있으면 변경 계획을 거절합니다. 전체 지원 계약은 [CLI MVP 문서](docs/cli-mvp.md)를 참고하세요.
+
+## 빠른 시작
+
+### 서버 실행
+
+Go 버전은 [go.mod](go.mod)를 따릅니다. 다음은 Bash 예시입니다. `<...>`는 실제 환경에 맞게 바꾸고, 인증정보는 Secret 관리 도구나 별도 환경 파일에서 주입하세요.
+
 ```bash
-# 이미지 빌드
-docker build -t git-updater:latest .
-
-# 컨테이너 실행
-docker run -d \
-  -p 3000:3000 \
-  -v git-updater-data:/app/data \
-  -e API_KEY="your-api-key" \
-  -e GIT_REPOSITORY_URL="https://github.com/your-org/your-repo.git" \
-  -e GIT_AUTH_METHOD="http" \
-  -e GIT_USERNAME="username" \
-  -e GIT_PASSWORD="token" \
-  git-updater:latest
-```
-
-#### SSH 인증과 호스트키 검증
-
-SSH를 사용할 때는 개인키뿐 아니라 원격 Git 서버의 호스트키를 포함한 `known_hosts` 파일도 제공해야 합니다. 이 검증은 서버 위조(MITM)를 막기 위한 것으로, 파일에 없는 서버 키나 변경된 키와의 연결은 거부됩니다. 호스트키 지문은 GitHub/GitLab 등 Git 제공자의 공식 문서에서 확인한 뒤 파일에 등록하세요.
-
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -v git-updater-data:/app/data \
-  -v /secure/git-private-key:/run/secrets/git-private-key:ro \
-  -v /secure/git-known-hosts:/run/secrets/git-known-hosts:ro \
-  -e GIT_AUTH_METHOD="ssh" \
-  -e GIT_REPOSITORY_URL="git@github.com:your-org/your-repo.git" \
-  -e API_KEY="your-api-key" \
-  -e GIT_SSH_PRIVATE_KEY="/run/secrets/git-private-key" \
-  -e GIT_SSH_KNOWN_HOSTS_FILE="/run/secrets/git-known-hosts" \
-  git-updater:latest
-```
-
----
-
-### 2. CLI 클라이언트로 업데이트 요청하기
-
-개발자 환경이나 CI/CD 툴(Woodpecker, GitHub Actions, GitLab CI 등)에서 API 서버로 업데이트 요청을 직접 보낼 수 있습니다.
-
-#### CLI 빌드
-```bash
+go build -o git-updater ./cmd/server
 go build -o git-updater-cli ./cmd/cli
+
+export API_KEY='<controller-api-key>'
+export GIT_REPOSITORY_URL='https://github.com/<owner>/<gitops-repo>.git'
+export GIT_AUTH_METHOD='http'
+export GIT_USERNAME='<github-user>'
+export GIT_PASSWORD='<github-token>'
+export GITHUB_TOKEN='<github-api-token>'
+export GIT_TARGET_BRANCH='main'
+export GITOPS_PATH='apps'
+export REGISTRY_HOSTS='registry.example.com'
+export AUTO_UPDATE='false'
+
+./git-updater
 ```
 
-#### CLI 실행 옵션
-* `-server`: API 서버의 주소 (기본값: `http://localhost:3000`, 또는 `GIT_UPDATER_SERVER_URL` 환경 변수 사용 가능)
-* `-file`: 업데이트 대상 YAML 파일 경로 (저장소 내 상대 경로)
-* `-image`: 업데이트할 컨테이너 이미지 이름
-* `-tag`: 새로 적용할 컨테이너 이미지 태그
+`apps`는 실제 저장소에 존재하는 경로로 바꾸세요. 사설 registry는 아래 인증 설정도 필요합니다. 초기에는 조회와 preview로 범위를 확인하고 자동 변경을 활성화하세요.
 
-`image`는 tag/digest를 포함하지 않는 repository 이름이고 `tag`는 별도 필드입니다. 공백 등 잘못된 image/tag와 경로 탈출·절대 경로·비 YAML 파일은 API에서 400으로 거절합니다. 파일 경로는 repository 기준 상대 경로와 `/` 구분자를 사용합니다. 실제 파일 존재 여부와 symlink 검사는 작업 실행 시에도 검증합니다.
+### CLI로 조회 → 계획 → 적용
 
-#### 사용 예시
+별도 터미널에서 실행합니다. CLI에는 GitHub/registry 인증정보 대신 서버 API key만 제공합니다.
+
 ```bash
-# 명령행 인자를 모두 명시하여 요청 전송
-./git-updater-cli \
-  -server="http://localhost:3000" \
-  -file="deployments/web.yaml" \
-  -image="nginx" \
-  -tag="1.25.4"
+export GIT_UPDATER_SERVER_URL='http://localhost:3000'
+export GIT_UPDATER_API_KEY='<controller-api-key>'
 
-# 환경 변수를 기본값으로 지정하여 간단히 호출
-export GIT_UPDATER_SERVER_URL="https://git-updater.your-domain.com"
-./git-updater-cli -file="deployments/web.yaml" -image="nginx" -tag="1.25.4"
+./git-updater-cli inspect
+./git-updater-cli images --image registry.example.com/backend
+
+./git-updater-cli plan --id release-example \
+  --change registry.example.com/backend=v1.9.0 \
+  --change registry.example.com/frontend=v3.5.0
+
+# 표시된 base revision, 영향 범위, 검증 결과와 diff를 검토한 뒤 실행
+./git-updater-cli apply --id release-example
+./git-updater-cli show --id release-example
+./git-updater-cli changesets
+./git-updater-cli jobs
 ```
 
----
+`plan`은 commit/push하지 않습니다. `apply`는 저장된 계획을 검증한 뒤 게시합니다. HEAD가 바뀌면 새 ID로 계획을 다시 만들어야 합니다. 같은 ID를 다른 요청 내용으로 재사용하면 409입니다. 기계가 읽을 출력은 `--json`, 환경·파일 선택은 `plan --env` / `--file`을 사용하세요.
 
-## 테스트 실행
+기존 `-image/-tag` CLI도 지원하지만 즉시 실행 요청입니다. 변경 전 검토에는 `plan/apply`를 사용하세요.
 
-프로젝트의 단위 테스트를 진행하려면 아래 명령어를 사용하세요.
+## 인증과 서버 설정
+
+세 가지 인증은 역할이 다릅니다.
+
+| 인증 | 용도 |
+|---|---|
+| `API_KEY` | CLI/API/Zot → git-updater 접근 |
+| SSH 키 또는 HTTP Git 인증 | git-updater → Git clone/fetch/push |
+| `GITHUB_TOKEN` | git-updater → GitHub API의 repository ID·권한·브랜치 검증 |
+
+**SSH가 동작해도 GitHub API 검증에는 token이 필요합니다.** 현재 token 입력은 환경변수입니다. `GITHUB_TOKEN_FILE`이나 GitHub App token 자동 발급은 아직 구현하지 않았습니다. Kubernetes에서는 Secret의 값을 환경변수로 주입할 수 있습니다. 실제 인증정보를 Git에 커밋하지 마세요.
+
+### 기본·Git 설정
+
+| 변수 | 의미 |
+|---|---|
+| `API_KEY` | 필수. `WEBHOOK_SECRET` 호환 지원 |
+| `GIT_REPOSITORY_URL` | 대상 저장소. `GIT_REPO_URL` 호환 지원 |
+| `GIT_AUTH_METHOD` | `http` 또는 `ssh` |
+| `GIT_USERNAME`, `GIT_PASSWORD` | HTTP Git 인증 시 필수 |
+| `GIT_SSH_PRIVATE_KEY` | SSH 개인키 내용 또는 파일 경로 |
+| `GIT_SSH_KNOWN_HOSTS_FILE` | SSH 사용 시 필수. 검증한 Git 서버 호스트키 파일 |
+| `GITHUB_TOKEN` | GitHub API 검증용. HTTP Git 모드에서는 생략 시 `GIT_PASSWORD` 사용 |
+| `GITHUB_REPOSITORY_ID` | 권장 identity pin. GitHub webhook 활성화 시 필수 |
+| `GIT_TARGET_BRANCH` | 대상 기존 브랜치. 생략 시 clone의 기본 브랜치 |
+| `GITOPS_PATH` | 저장소 기준 분석 디렉터리. 기본 `.` |
+| `JOB_DB_PATH` | SQLite 경로. 기본 `./data/jobs.db` |
+| `PORT` | 기본 `3000` |
+| `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | 기본 `git-updater`, `git-updater@localhost` |
+
+운영 provider 검증은 현재 github.com만 지원하며, protected branch에는 직접 push하지 않습니다. Git URL을 바꾸는 것만으로 동일 DB를 다른 repository identity에 재사용할 수 없습니다.
+
+### Registry 설정
+
+| 변수 | 의미 |
+|---|---|
+| `REGISTRY_HOSTS` | tag 검증을 허용할 hostname[:port] 목록. 쉼표로 구분 |
+| `REGISTRY_AUTH_HOST` | 아래 인증을 보낼 단일 host. allowlist에도 있어야 함 |
+| `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` | 해당 registry의 Basic 인증 |
+| `REGISTRY_BEARER_TOKEN` | 해당 registry의 Bearer 인증. Basic보다 우선 |
+| `ZOT_REGISTRY_HOST` | Zot 이벤트의 이미지 이름에 붙일 registry host. 생략 시 단일 `REGISTRY_HOSTS` 사용 |
+
+Pod의 `imagePullSecret`은 서버 내부 registry API 인증을 대신하지 않습니다. registry token의 자동 challenge 교환은 미지원입니다. 태그는 변경 가능한 이름이므로 digest 확인이 이미지의 영구 불변성을 보장하지는 않습니다.
+
+## 자동 변경과 정책
+
+- `AUTO_UPDATE=true`: webhook 등 자동 이미지 변경 작업을 허용합니다. 기본값은 비활성입니다.
+- `AUTOMATION_ENVIRONMENTS`: 자동 변경 허용 환경 ID 목록입니다. 쉼표로 구분하며 생략하면 환경 제한이 없습니다.
+- 명시적 `apply`와 기존 `Force` 요청은 수동 경로입니다. 자동 처리 스위치·환경 필터와 별개이지만 repository/registry 검증과 CAS는 수행합니다.
+- 공통 base 수정이 선택하지 않은 환경까지 바꾸면 거절합니다.
+
+현재는 **전역 스위치와 공통 환경 필터**만 있습니다. 글로벌/레포/이미지별 rule, 우선순위 병합, 태그 패턴·SemVer 선택은 아직 없습니다. `AUTO_UPDATE=true`만으로 인증·파서·registry 검증 실패가 해소되지는 않습니다.
+
+## Webhook
+
+### Zot → `/webhook/zot`
+
+CLI를 거치지 않고 Zot가 서버로 직접 POST합니다. 인증은 `Authorization: Bearer <API_KEY>` 또는 `X-API-Key: <API_KEY>`입니다.
+
+Zot HTTP sink 예시입니다. 아래 값은 자리표시자이며, 실제 Authorization 값이 들어간 설정은 Secret으로 관리하세요. 이 JSON이 환경변수를 자동 치환한다는 의미는 아닙니다.
+
+```json
+{
+  "type": "http",
+  "address": "http://git-updater-service.gitupdate.svc.cluster.local/webhook/zot",
+  "timeout": "5s",
+  "headers": {
+    "Authorization": "Bearer <controller-api-key>"
+  }
+}
+```
+
+위 주소는 배포 예제의 Kubernetes Service 기준입니다. 실제 Zot workload가 마운트한 설정을 확인하세요. 이름이 같은 ConfigMap과 Secret이 있어도 사용되는 것은 마운트 대상뿐입니다. `subPath`로 마운트한 설정은 변경 후 Pod 재생성이 필요합니다.
+
+지원하는 CloudEvents 형식:
+
+- **Binary HTTP:** `ce-specversion: 1.0`, `ce-id`, `ce-source`, `ce-type`, 선택적 `ce-time` 헤더와 JSON data body
+- **Structured JSON:** `Content-Type: application/cloudevents+json`과 metadata/data envelope
+- `zotregistry.image.updated`의 `name` / `reference`를 이미지·태그로 해석
+- 다른 이벤트와 digest 주소로 업로드된 manifest는 무시
+- 같은 registry·source·event ID는 중복 작업을 만들지 않으며, 내용이 달라지면 409
+
+CloudEvents의 `source`인 `zotregistry.dev`는 registry 주소가 아닙니다. `ZOT_REGISTRY_HOST`를 사용하거나 단일 `REGISTRY_HOSTS`를 설정해야 합니다. 기존 `action: push` / `target` JSON도 지원합니다.
+
+**202는 작업 영속 저장, 200 `ignored`는 이벤트 제외를 의미합니다. 둘 다 Git 변경 성공을 뜻하지 않습니다.** 반환된 `jobId`로 작업 결과를 확인하세요.
+
+### GitHub → `/webhook/github`
+
+`GITHUB_WEBHOOK_SECRET`과 `GITHUB_REPOSITORY_ID`를 설정합니다. `GITHUB_WEBHOOK_ENABLED=false`로 비활성화할 수 있습니다. 서명과 repository ID를 확인한 뒤 대상 브랜치의 push를 Git 동기화 작업으로 처리합니다. 이 이벤트 자체가 이미지 버전을 선택하지는 않습니다.
+
+## Docker와 Kubernetes
+
+현재 기본 이미지는 서버 `/app/git-updater`와 CLI `/app/git-updater-cli`를 모두 포함합니다. CLI는 호출할 때만 실행되며 별도 상시 프로세스는 아닙니다. 서버/CLI 이미지 분리는 현재 main에 포함되지 않았습니다.
+
 ```bash
-go test -v ./...
+docker build -t git-updater:local .
+# /secure/server.env에 위 서버 설정을 준비하고 접근 권한을 제한합니다.
+docker run -d --name git-updater \
+  -p 127.0.0.1:3000:3000 \
+  --env-file /secure/server.env \
+  -v git-updater-data:/app/data \
+  git-updater:local
+
+docker exec git-updater sh -c \
+  'GIT_UPDATER_API_KEY="$API_KEY" /app/git-updater-cli inspect'
 ```
 
----
+Kubernetes 배포·Secret·PVC·업그레이드는 [k3s 운영 문서](deploy/k3s/README.md)를 참고하세요. 단일 Pod와 `Recreate`, SQLite용 PVC를 사용합니다. 기존 GitOps 관리 리소스는 Git에서 수정하여 Argo CD 등이 반영하도록 합니다.
 
-## 작업 상태 및 재시도
+```bash
+kubectl -n gitupdate port-forward service/git-updater-service 3000:80
+# 별도 터미널에서 로컬 CLI 사용, 또는 아래처럼 포함된 CLI 실행
+kubectl -n gitupdate exec deployment/git-updater -- sh -c \
+  'GIT_UPDATER_API_KEY="$API_KEY" /app/git-updater-cli inspect'
+```
 
-요청은 SQLite 작업 저장소에 영속화됩니다. Git 처리 실패 시 5초부터 지수 백오프로 재시도하며, 총 3회 시도 후 `failed` 상태로 남습니다.
+CI는 main push에서 `nightly-<sha8>` / `nightly`, Git tag 이벤트에서 해당 버전 태그 / `latest` 이미지를 발행하도록 설정되어 있습니다. 배포 manifest의 이미지 변경은 별도 단계입니다. 자세한 조건은 [.woodpecker.yaml](.woodpecker.yaml)을 참고하세요.
 
-* `GET /api/jobs/{jobId}`: 작업 상태, 시도 횟수, 마지막 오류 및 다음 재시도 시각 조회
-* `POST /api/jobs/{jobId}/retry`: `failed` 작업을 수동으로 다시 큐에 등록
+## 상태 확인과 장애 대응
 
-API/CLI의 같은 ID·같은 변경 내용은 기존 작업을 반환하고, 같은 ID·다른 내용은 `409 idempotency_conflict`로 거절합니다. `/api/update`와 `/webhook`은 같은 요청 namespace입니다. GitHub/Zot delivery는 source별 ID로 분리하며 반환된 `jobId`로 조회해야 합니다. source에 따른 fingerprint는 DB에 보존됩니다. ID 없는 webhook은 새 요청으로 취급하며, 기존 버전에서 fingerprint 없이 저장된 ID를 새 요청에 재사용하면 409가 반환됩니다(기존 조회·수동 retry는 유지).
+| 확인 경로 | 의미 |
+|---|---|
+| `GET /health`, `GET /ready` | 프로세스·워커·DB 상태. Git 쓰기 성공 보장은 아님 |
+| `GET /api/repository` 또는 `inspect` | identity 검증 상태, revision, 사용처, parser diagnostic |
+| `GET /api/status` | 비동기 작업 집계 |
+| `jobs`, `job --id <jobId>` | webhook/기존 API의 작업·시도 횟수·오류 |
+| `changesets`, `show --id <planId>` | 변경 계획·diff·게시 결과 |
 
-GitHub webhook은 서버가 현재 추적 중인 브랜치에 대한 `push` 이벤트만 워크스페이스 동기화 작업으로 처리합니다.
+`/api/*`는 API key 인증이 필요합니다. 비동기 Git 처리 실패는 최대 3회 시도하며, 실패 원인을 해소한 뒤 `retry --id <jobId>`를 사용할 수 있습니다. baseline HEAD가 달라진 작업은 새 요청이 필요합니다. `apply`는 저장된 계획을 동기 실행하는 별도 API입니다.
 
-GitHub webhook 활성화 시 repository ID가 없으면 시작에 실패합니다. 올바른 서명이라도 다른 repository ID는 403, ID 누락은 400으로 거절합니다. ID는 저장소 이름 변경과 무관한 GitHub ID를 설정합니다. 이번 보호는 운영자가 지정한 ID에 이벤트를 묶는 기능이며, provider API로 clone URL과 ID의 일치를 자동 검증하는 기능은 아닙니다.
+| 증상 | 확인할 항목 |
+|---|---|
+| Zot POST 404 | `/webhook/zot` 주소와 실제 마운트 설정 |
+| Zot POST 401 | 서버 API key와 sink 인증 일치 여부 |
+| CloudEvent 400 | 필수 metadata/data, registry host 설정 |
+| `GITHUB_TOKEN is required` | SSH Git 인증과 별개인 GitHub API token |
+| `repository has parser diagnostics` | `inspect` 결과와 미지원 구문, 분석 scope |
+| registry 검증 실패 | tag 존재, allowlist, 서버용 registry 인증 |
+| stale/plan conflict | 최신 HEAD에서 새 ID로 계획 생성 |
 
-작업 조회의 `outcome`은 `published`(commit/push), `already_satisfied`(이미 반영됨), `synchronized`(Git 동기화), `no_match`(선택한 파일에 이미지 없음), `skipped_policy`(자동 변경 비활성), `invalid_request`(기존 DB의 잘못된 요청)를 구분합니다. `no_match`는 자동 재시도 없는 failed, 정책 skip은 skipped 상태입니다. `/api/status`에도 outcome별 개수를 제공합니다. 기존 버전의 완료 작업은 결과를 추정해 채우지 않으므로 outcome이 비어 있을 수 있습니다. 자동 검색은 fetch 직후 인덱스를 재구성하며, 읽기/파싱 실패를 이미지 미발견으로 처리하지 않습니다.
+서버 장애·작업 실패의 외부 알림 연동은 아직 없습니다. 상태 API와 로그를 운영 모니터링에 연결해야 합니다.
 
-## k3s 운영 및 상태 확인
+## 개발 및 검증
 
-[배포 예제와 업그레이드 절차](deploy/k3s/README.md)를 확인하세요. 단일 Pod와 `Recreate` 전략, 작업 DB용 PVC, SSH Secret이 필요합니다. 예제는 자동 적용되지 않으며 이미지 태그와 환경별 설정을 채운 뒤 사용합니다.
+```bash
+go test ./... -count=1
+go vet ./...
+RUN_API_E2E=1 go test ./... -count=1 -timeout 150s
+```
 
-* `GET /health`: 프로세스 생존 확인용. Git 작업 성공 여부를 의미하지 않습니다.
-* `GET /ready`: 워커 종료·서버 종료 상태 및 DB 연결 확인용. 원격 Git 쓰기 권한은 실제 작업으로 검증해야 합니다.
-* `GET /api/status`: API 키로 인증 후 작업 상태별 개수와 최근 성공/실패 레코드의 갱신 시각 조회. 실패 작업의 ID를 알고 있다면 `/api/jobs/{id}`로 상세 조회합니다.
+PowerShell에서는 `$env:RUN_API_E2E='1'`로 설정한 뒤 테스트합니다. E2E는 임시 로컬 Git 저장소와 실제 서버/CLI 프로세스로 수행합니다. `CONTROLLER_LOCAL_MODE=true`는 절대 로컬 Git 경로만 허용하는 테스트 옵션이며 운영 인증 우회용으로 사용할 수 없습니다.
 
-Git 작성자를 명시적으로 설정하므로 컨테이너에 `.gitconfig`가 없어도 커밋할 수 있습니다. Git clone/fetch/push의 네트워크 시간 제한은 각각 30초입니다. SIGTERM 수신 시 새 작업 claim을 중단하고 대기 작업은 DB에 남겨 다음 시작에 처리합니다.
+| 경로 | 책임 |
+|---|---|
+| `cmd/server` | HTTP API, 인증, webhook 정규화 |
+| `cmd/cli` | 서버 API를 사용하는 CLI |
+| `internal/controller` | Repository Model, resolver, 영향 분석, 최소 mutation 계획 |
+| `internal/gitManager` | Git/provider/registry 검증, SQLite, worker, 조건부 push |
+| `internal/singlewriter` | workspace·DB 중복 실행 방지 |
 
-**기존 버전에서 변경된 설정:** 인증키 없는 실행은 허용하지 않습니다. GitHub Secret 없이 GitHub webhook을 사용하던 구성은 Secret을 추가해야 합니다. `GITHUB_WEBHOOK_ENABLED=false`로 해당 경로를 명시적으로 끌 수도 있습니다. SQLite 사용 전 버전의 메모리 큐는 자동 이전되지 않습니다.
+상세 계약과 API 목록: [CLI MVP](docs/cli-mvp.md) · 배포 절차: [k3s 운영](deploy/k3s/README.md)
