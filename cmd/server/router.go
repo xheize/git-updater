@@ -312,8 +312,8 @@ type ZotWebhookPayload struct {
 
 // handleZotWebhook validates Zot push notification, maps it into Job, and enqueues it
 func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitManager.JobStore) error {
-	var payload ZotWebhookPayload
-	if err := c.BodyParser(&payload); err != nil {
+	payload, scope, payloadHash, err := decodeZotEvent(c)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "failed to parse request body: " + err.Error(),
 		})
@@ -352,13 +352,12 @@ func handleZotWebhook(c *fiber.Ctx, jobQueue chan gitManager.Job, jobStore *gitM
 	if payload.ID == "" {
 		payload.ID = fmt.Sprintf("generated-%d", time.Now().UnixNano())
 	}
-	scope := "zot:" + payload.Request.Host
 	job.ID = deliveryJobID(scope, payload.ID)
 	if job.Timestamp.IsZero() {
 		job.Timestamp = time.Now()
 	}
 
-	inserted, err := jobStore.EnqueueScoped(job, scope, webhookPayloadHash(c.Body()))
+	inserted, err := jobStore.EnqueueScoped(job, scope, payloadHash)
 	if err != nil {
 		if errors.Is(err, gitManager.ErrIdempotencyConflict) {
 			return idempotencyConflict(c)
