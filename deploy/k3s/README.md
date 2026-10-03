@@ -12,7 +12,7 @@
 
 ## 준비
 
-CLI MVP부터 SSH Git 인증과 별도로 provider 검증용 `GITHUB_TOKEN`이 필요하다. 서버 Secret에 `REGISTRY_HOSTS`와 필요 시 `REGISTRY_AUTH_HOST`/registry 인증도 추가한다. Pod imagePullSecret은 controller의 registry API 인증을 대신하지 않는다. [MVP 설정](../../docs/cli-mvp.md)을 적용하지 않으면 health/readiness가 정상이어도 변경 validation이 거절될 수 있다. `CONTROLLER_LOCAL_MODE`는 운영에 설정하지 않는다.
+GitHub provider API 검증에는 `GITHUB_TOKEN`을 사용한다. token 없는 SSH는 최초 Git 읽기·임시 ref 생성/삭제 검증 후 사용할 수 있다. 이 모드는 immutable provider ID와 대상 브랜치 보호 규칙을 사전에 확인하지 못하며, `GITHUB_REPOSITORY_ID` pin이 있으면 token이 필요하다. 서버 시작 시 실제 임시 원격 브랜치를 생성·삭제하므로 해당 권한이 필요하다. 서버 Secret에 `REGISTRY_HOSTS`와 필요 시 `REGISTRY_AUTH_HOST`/registry 인증도 추가한다. Pod imagePullSecret은 controller의 registry API 인증을 대신하지 않는다. [MVP 설정](../../docs/cli-mvp.md)을 적용하지 않으면 health/readiness가 정상이어도 변경 validation이 거절될 수 있다. `CONTROLLER_LOCAL_MODE`는 운영에 설정하지 않는다.
 
 1. 배포 YAML의 `REPLACE_WITH_REVIEWED_TAG`를 **이 PR이 포함된 빌드의 고정 태그 또는 digest**로 바꾼다. `v0.0.3`과 이전 이미지에는 새 설정·상태 API가 없다. 기존 배포의 selector와 Service 이름, namespace도 비교한다.
 2. namespace를 만들고 Secret을 준비한다. 아래 `server.env`는 저장소 밖에 권한을 제한해 보관한다. `API_KEY`, `GIT_REPOSITORY_URL`을 포함해야 한다. GitHub 웹훅을 사용할 때는 `GITHUB_WEBHOOK_SECRET`과 `GITHUB_REPOSITORY_ID`도 추가하고 Deployment의 `GITHUB_WEBHOOK_ENABLED`를 `true`로 바꾼다. 설정하지 않으면 `/webhook/github`는 404다.

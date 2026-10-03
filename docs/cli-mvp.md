@@ -22,7 +22,7 @@
 |---|---|
 | `GIT_TARGET_BRANCH` | 선택할 기존 브랜치. 기존 workspace의 브랜치와 다르면 시작 거절 |
 | `GITOPS_PATH` | 분석 scope. 기본 `.` |
-| `GITHUB_TOKEN` | GitHub REST repository/read/write/branch 검증용 token. HTTP Git 인증에서는 생략 시 `GIT_PASSWORD` 사용. SSH 사용 시 별도로 설정 |
+| `GITHUB_TOKEN` | GitHub REST repository/read/write/branch 검증용 token. HTTP Git 인증에서는 생략 시 `GIT_PASSWORD` 사용. SSH-only 최초 Git 쓰기 검증 모드에서는 생략 가능; immutable ID pin 사용 시 필요 |
 | `GITHUB_REPOSITORY_ID` | 권장 identity pin. webhook 사용 시 기존처럼 필수. 조회한 ID와도 비교 |
 | `REGISTRY_HOSTS` | 검증을 허용할 registry hostname[:port] 목록. 쉼표로 구분. Docker Hub 이름은 `docker.io` |
 | `REGISTRY_AUTH_HOST` | 아래 인증을 보낼 단일 registry host. allowlist에도 있어야 함 |
@@ -83,7 +83,7 @@ $env:GIT_UPDATER_API_KEY = '<controller-api-key>'
 ./git-updater-cli.exe jobs --limit 20 --offset 0
 ```
 
-`plan`은 commit/push하지 않는다. ID를 생략하면 CLI가 생성한다. 동일 ID·동일 intent는 저장된 계획을 반환하며 최신 HEAD에서 다시 계산하지 않는다. 같은 ID로 요청 내용을 바꾸면 409다. HEAD나 scope가 바뀌면 **새 ID로 plan을 만들고 다시 검토**해야 한다. `apply`는 저장된 계획 ID만 받아 실행하며 클라이언트가 전송한 diff를 실행하지 않는다.
+`plan`은 변경 commit을 만들거나 대상 브랜치에 push하지 않는다. 단, 초기 접근 검증이 미완료이면 임시 검증 ref 생성·삭제가 선행될 수 있다. ID를 생략하면 CLI가 생성한다. 동일 ID·동일 intent는 저장된 계획을 반환하며 최신 HEAD에서 다시 계산하지 않는다. 같은 ID로 요청 내용을 바꾸면 409다. HEAD나 scope가 바뀌면 **새 ID로 plan을 만들고 다시 검토**해야 한다. `apply`는 저장된 계획 ID만 받아 실행하며 클라이언트가 전송한 diff를 실행하지 않는다.
 
 환경/파일 선택:
 
@@ -173,3 +173,7 @@ with changed data/time returns 409. A 202 response means durable admission,
 not successful Git publication. AUTO_UPDATE, repository identity, parser,
 registry validation and Git concurrency checks still apply. HTTP 200 ignored
 must not be interpreted as a successful image update.
+
+## 인증수단 최초 검증
+
+[README의 최초 Git 접근 검증](../README.md#최초-git-접근-검증)을 참고한다. 서버 시작 시 임시 원격 ref 생성·삭제로 Git 쓰기를 확인하며, 성공은 프로세스 내에서만 재사용한다. token 없는 SSH는 origin URL 기반 identity로 동작하고 provider ID·보호 상태는 미확인이다. 명시한 immutable ID pin 및 실패한 API 검증을 우회하지 않는다. 기존 parser·registry·CAS 검증은 유지한다.

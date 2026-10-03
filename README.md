@@ -77,7 +77,7 @@ export GIT_UPDATER_API_KEY='<controller-api-key>'
 ./git-updater-cli jobs
 ```
 
-`plan`은 commit/push하지 않습니다. `apply`는 저장된 계획을 검증한 뒤 게시합니다. HEAD가 바뀌면 새 ID로 계획을 다시 만들어야 합니다. 같은 ID를 다른 요청 내용으로 재사용하면 409입니다. 기계가 읽을 출력은 `--json`, 환경·파일 선택은 `plan --env` / `--file`을 사용하세요.
+`plan`은 변경 commit을 만들거나 대상 브랜치에 push하지 않습니다. 최초 접근 검증이 미완료라면 임시 검증 ref 생성·삭제를 먼저 수행할 수 있습니다. `apply`는 저장된 계획을 검증한 뒤 게시합니다. HEAD가 바뀌면 새 ID로 계획을 다시 만들어야 합니다. 같은 ID를 다른 요청 내용으로 재사용하면 409입니다. 기계가 읽을 출력은 `--json`, 환경·파일 선택은 `plan --env` / `--file`을 사용하세요.
 
 기존 `-image/-tag` CLI도 지원하지만 즉시 실행 요청입니다. 변경 전 검토에는 `plan/apply`를 사용하세요.
 
@@ -91,7 +91,7 @@ export GIT_UPDATER_API_KEY='<controller-api-key>'
 | SSH 키 또는 HTTP Git 인증 | git-updater → Git clone/fetch/push |
 | `GITHUB_TOKEN` | git-updater → GitHub API의 repository ID·권한·브랜치 검증 |
 
-**SSH가 동작해도 GitHub API 검증에는 token이 필요합니다.** 현재 token 입력은 환경변수입니다. `GITHUB_TOKEN_FILE`이나 GitHub App token 자동 발급은 아직 구현하지 않았습니다. Kubernetes에서는 Secret의 값을 환경변수로 주입할 수 있습니다. 실제 인증정보를 Git에 커밋하지 마세요.
+**SSH 인증은 최초 원격 읽기·쓰기 검증을 통과하면 token 없이 사용할 수 있습니다.** GitHub API 기반 immutable ID·보호 규칙 조회에는 token이 필요합니다. 현재 token 입력은 환경변수입니다. `GITHUB_TOKEN_FILE`이나 GitHub App token 자동 발급은 아직 구현하지 않았습니다. Kubernetes에서는 Secret의 값을 환경변수로 주입할 수 있습니다. 실제 인증정보를 Git에 커밋하지 마세요.
 
 ### 기본·Git 설정
 
@@ -111,7 +111,7 @@ export GIT_UPDATER_API_KEY='<controller-api-key>'
 | `PORT` | 기본 `3000` |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | 기본 `git-updater`, `git-updater@localhost` |
 
-운영 provider 검증은 현재 github.com만 지원하며, protected branch에는 직접 push하지 않습니다. Git URL을 바꾸는 것만으로 동일 DB를 다른 repository identity에 재사용할 수 없습니다.
+운영 provider 검증은 현재 github.com만 지원합니다. API가 protected branch로 확인한 경우 직접 push하지 않습니다. SSH-only 모드는 보호 상태를 미확인으로 표시하며 최종 push에서 서버 규칙을 따릅니다. Git URL을 바꾸는 것만으로 동일 DB를 다른 repository identity에 재사용할 수 없습니다.
 
 ### Registry 설정
 
@@ -216,7 +216,7 @@ CI는 main push에서 `nightly-<sha8>` / `nightly`, Git tag 이벤트에서 해�
 | Zot POST 404 | `/webhook/zot` 주소와 실제 마운트 설정 |
 | Zot POST 401 | 서버 API key와 sink 인증 일치 여부 |
 | CloudEvent 400 | 필수 metadata/data, registry host 설정 |
-| `GITHUB_TOKEN is required` | SSH Git 인증과 별개인 GitHub API token |
+| 초기 Git 검증 실패 | SSH/HTTP 읽기·쓰기 권한과 임시 검증 브랜치 생성·삭제 허용 여부 |
 | `repository has parser diagnostics` | `inspect` 결과와 미지원 구문, 분석 scope |
 | registry 검증 실패 | tag 존재, allowlist, 서버용 registry 인증 |
 | stale/plan conflict | 최신 HEAD에서 새 ID로 계획 생성 |
@@ -242,3 +242,13 @@ PowerShell에서는 `$env:RUN_API_E2E='1'`로 설정한 뒤 테스트합니다. 
 | `internal/singlewriter` | workspace·DB 중복 실행 방지 |
 
 상세 계약과 API 목록: [CLI MVP](docs/cli-mvp.md) · 배포 절차: [k3s 운영](deploy/k3s/README.md)
+
+## 최초 Git 접근 검증
+
+서버 시작 시 설정된 Git 인증으로 대상 브랜치 ref를 조회하고, 기존 commit을 가리키는 무작위 "git-updater-verify/<nonce>" 브랜치를 원격 생성·삭제합니다. 이는 실제 원격 쓰기 테스트이며 대상 브랜치를 수정하지 않지만 Git 이벤트를 발생시킬 수 있습니다. 검증 실패 시 조회용 서버는 유지하고 변경은 거절합니다. 다음 변경 요청에서 다시 검증할 수 있습니다.
+
+검증 성공은 현재 프로세스에서 저장소·대상 브랜치별로 재사용합니다. 인증정보 변경 시 서버를 재시작하며 최초 검증을 다시 수행합니다. 임시 ref 정보는 SQLite에 먼저 기록하고, 삭제 실패·응답 손실·프로세스 중단 시 후속 검증에서 정리합니다. ref가 다른 commit으로 바뀌었으면 삭제하지 않고 수동 확인을 요구합니다. DB를 잃으면 해당 정리 정보도 잃으므로 보존해야 합니다.
+
+SSH-only identity는 provider의 immutable ID가 아니라 정규화된 origin URL에 결합합니다. API의 "verificationMethod", "protectionKnown", "checkedAt"을 확인하세요. GITHUB_REPOSITORY_ID를 명시적으로 고정한 경우 token 없이 이를 검증했다고 처리하지 않습니다. token이 설정되어 있지만 API 검증이 실패한 경우에도 조용히 SSH 모드로 전환하지 않습니다. SSH-only와 provider ID 모드 사이 전환은 기존 DB binding/계획과 충돌할 수 있으므로 별도 상태 저장소·새 계획으로 명시적으로 전환해야 합니다.
+
+최초 임시 브랜치 테스트는 main 등 대상 브랜치의 보호 규칙 통과를 보장하지 않습니다. 실제 변경에서도 최신 revision, registry 검증, CAS를 유지하며 최종 push 결과로 게시 성공을 확정합니다. 파서·registry 검증 실패는 이 인증 변경과 별개입니다.
