@@ -8,6 +8,100 @@ import (
 func deployment(image string) string {
 	return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: " + image + " # keep this\n"
 }
+
+const kyvernoPolicy = `apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-registry-creds
+spec:
+  background: false
+  rules:
+  - name: inject-mounts
+    mutate:
+      foreach:
+      - list: "request.object.spec.containers"
+        patchStrategicMerge:
+          spec:
+            containers:
+            - name: "{{ element.name }}"
+              image: "{{ request.object.metadata.labels.image }}"
+              volumeMounts:
+              - name: registry-creds # preserve this comment
+                mountPath: /docker
+`
+
+func yamlList(items ...string) string {
+	s := "apiVersion: v1\nkind: List\nitems:\n"
+	for _, item := range items {
+		s += "- " + strings.ReplaceAll(strings.TrimSuffix(item, "\n"), "\n", "\n  ") + "\n"
+	}
+	return s
+}
+
+func TestKyvernoRuntimeExpressionsPreservePolicy(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"separate":       {"policy.yaml": kyvernoPolicy, "app.yaml": deployment("nginx:v1")},
+		"multi-document": {"all.yaml": kyvernoPolicy + "---\n" + deployment("nginx:v1")},
+		"list":           {"all.yaml": yamlList(kyvernoPolicy, deployment("nginx:v1"))},
+		"namespaced":     {"policy.yaml": strings.Replace(kyvernoPolicy, "kind: ClusterPolicy", "kind: Policy", 1), "app.yaml": deployment("nginx:v1")},
+		"kustomize":      {"policy.yaml": kyvernoPolicy, "app.yaml": deployment("nginx:v1"), "kustomization.yaml": "resources: [policy.yaml, app.yaml]\n"},
+		"comment":        {"app.yaml": "# {{ harmless comment }}\n" + deployment("nginx:v1")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := Parse("abc", files)
+			if len(m.Diagnostics) != 0 || len(m.Uses) != 1 {
+				t.Fatalf("unexpected model: %+v", m)
+			}
+			p, err := BuildPlan(m, files, Intent{"release", []Change{{Image: "nginx", Tag: "v2"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Mutations) != 1 {
+				t.Fatalf("unexpected mutations: %+v", p.Mutations)
+			}
+			after, err := Apply(files, p.Mutations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for file, before := range files {
+				if after[file] != strings.Replace(before, "nginx:v1", "nginx:v2", 1) {
+					t.Fatalf("unrelated bytes changed in %s", file)
+				}
+			}
+		})
+	}
+}
+
+func TestKyvernoExceptionDoesNotBypassValidation(t *testing.T) {
+	for name, extra := range map[string]map[string]string{
+		"image":          {"bad.yaml": deployment("'nginx:{{ tag }}'")},
+		"multi-document": {"bad.yaml": kyvernoPolicy + "---\n" + deployment("'nginx:{{ tag }}'")},
+		"list":           {"bad.yaml": yamlList(kyvernoPolicy, deployment("'nginx:{{ tag }}'"))},
+		"identity":       {"bad.yaml": strings.Replace(kyvernoPolicy, "name: inject-registry-creds", "name: '{{ policy }}'", 1)},
+		"unknown-api":    {"bad.yaml": strings.Replace(kyvernoPolicy, "kyverno.io/v1", "other.io/v1", 1)},
+		"unknown-kind":   {"bad.yaml": strings.Replace(kyvernoPolicy, "ClusterPolicy", "OtherPolicy", 1)},
+		"duplicate":      {"bad.yaml": kyvernoPolicy + "spec: {}\n"},
+		"alias":          {"bad.yaml": strings.Replace(kyvernoPolicy, "background: false", "background: &value false\n  copy: *value", 1)},
+		"nested-policy":  {"bad.yaml": "kind: ConfigMap\napiVersion: v1\ndata:\n  embedded:\n    " + strings.ReplaceAll(kyvernoPolicy, "\n", "\n    ")},
+		"dependency":     {"kustomization.yaml": "resources: ['{{ base }}']\n"},
+		"override":       {"kustomization.yaml": "resources: [app.yaml]\nimages:\n- name: nginx\n  newTag: '{{ tag }}'\n"},
+		"helm":           {"chart/Chart.yaml": "apiVersion: v2\nname: example\n", "chart/templates/policy.yaml": kyvernoPolicy},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"app.yaml": deployment("nginx:v1")}
+			for k, v := range extra {
+				files[k] = v
+			}
+			m := Parse("abc", files)
+			if len(m.Diagnostics) == 0 {
+				t.Fatal("missing diagnostics")
+			}
+			if _, err := BuildPlan(m, files, Intent{"release", []Change{{Image: "nginx", Tag: "v2"}}}); err == nil {
+				t.Fatal("unsafe plan accepted")
+			}
+		})
+	}
+}
 func TestKustomizeImpactAndMinimalMutation(t *testing.T) {
 	files := map[string]string{
 		"base/deployment.yaml":             deployment("'ghcr.io/foo/api:v1'"),

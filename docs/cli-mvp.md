@@ -10,6 +10,7 @@
 - Kustomize는 local `resources`/`bases`, mapping 형태 `images.name/newName/newTag`만 지원한다. 환경 ID는 최상위 Kustomization 디렉터리 경로다. 별도 plain YAML은 `plain:<directory>`로 묶는다. 이는 저장소에서 계산한 프로파일이며 실제 배포 환경을 자동 발견한 결과가 아니다.
 - 같은 base를 공유할 때 요청하지 않은 환경까지 변경되면 거절한다. 필요한 override가 없다면 먼저 Git에서 추가해야 한다. override 자동 삽입은 없다.
 - Helm, remote bases, patches, replacements, generators, plugins, namespace/name 변환, anchors/aliases/merge keys, Git submodules 등은 지원하지 않는다. 선택 scope에 parser diagnostic이 있으면 **전체 ChangeSet을 거절**한다. 지원 불가 구문을 일반 YAML로 우회하지 않는다.
+- `kyverno.io/v1`의 `Policy`/`ClusterPolicy`는 `spec` 내부의 `{{ ... }}` 실행 시점 표현식을 원문 그대로 보존한다. 해당 정책을 렌더링하거나 정책 내부 이미지를 변경 대상으로 수집하지 않으며, 클러스터 admission 이후의 영향은 계산하지 않는다. 정책 외부의 템플릿, 정책 identity의 템플릿, 중복 key/anchor 등은 계속 차단한다. 여러 YAML document나 `v1/List`가 섞여 있어도 리소스별로 이 경계를 검증한다. YAML 주석의 `{{`는 템플릿 진단 대상이 아니다.
 - 이미 digest로 고정된 참조는 tag 변경으로 풀지 않는다. digest intent와 Helm values binding은 후속 범위다.
 - 기존 scalar의 byte span만 바꾸고 주석·나머지 공백·key order·CRLF·quote를 보존한다. 새 tag가 숫자/boolean으로 읽힐 수 있으면 그 scalar만 quote한다. 안전하게 위치를 확인할 수 없는 scalar는 거절한다. preview는 전체 파일의 unified hunk를 표시하지만 실제 commit의 변경은 scalar 교체다.
 - YAML 한 파일 2 MiB, scope 내 YAML 합계 32 MiB/10,000개 및 dependency traversal 제한이 있다. 이 MVP의 검증은 Kubernetes 전체 schema/admission validation이나 native Helm/Kustomize의 모든 동작 검증을 대체하지 않는다.

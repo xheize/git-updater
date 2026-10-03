@@ -89,10 +89,6 @@ func Parse(revision string, files map[string]string) Model {
 			p.problem(file, "unsupported_helm", "Helm rendering and reverse bindings are not supported")
 			continue
 		}
-		if strings.Contains(files[file], "{{") {
-			p.problem(file, "unsupported_template", "Templated YAML is not supported")
-			continue
-		}
 		dec := yaml.NewDecoder(strings.NewReader(files[file]))
 		for doc := 0; ; doc++ {
 			var n yaml.Node
@@ -113,6 +109,10 @@ func Parse(revision string, files map[string]string) Model {
 				continue
 			}
 			if base == "kustomization.yaml" || base == "kustomization.yml" || base == "Kustomization" {
+				if containsTemplate(root) {
+					p.problem(file, "unsupported_template", "Templated Kustomization is not supported")
+					continue
+				}
 				if doc != 0 {
 					p.problem(file, "invalid_kustomization", "Kustomization must contain one document")
 					continue
@@ -133,6 +133,10 @@ func Parse(revision string, files map[string]string) Model {
 				}
 				p.ks[dir] = kustomization{file, root}
 			} else {
+				if resourceContainsTemplate(root) {
+					p.problem(file, "unsupported_template", "Templated YAML outside Kyverno policy spec is not supported")
+					continue
+				}
 				p.resource(file, doc, root, "")
 			}
 		}
@@ -208,6 +212,53 @@ func Parse(revision string, files map[string]string) Model {
 	}
 	return p.model
 }
+
+// Only recognized resource boundaries grant the Kyverno exception. Nested
+// mappings that happen to contain kind/apiVersion are not resource boundaries.
+// Policy specs remain opaque: these runtime expressions are never rendered or
+// indexed as workload images. checkNode still validates the entire document.
+func resourceContainsTemplate(n *yaml.Node) bool {
+	api, kind := value(n, "apiVersion"), value(n, "kind")
+	policy := api == "kyverno.io/v1" && (kind == "Policy" || kind == "ClusterPolicy")
+	list := api == "v1" && kind == "List"
+	if n.Kind != yaml.MappingNode || (!policy && !list) {
+		return containsTemplate(n)
+	}
+	for i := 0; i < len(n.Content); i += 2 {
+		key, child := n.Content[i], n.Content[i+1]
+		if containsTemplate(key) {
+			return true
+		}
+		if policy && key.Value == "spec" {
+			continue
+		}
+		if list && key.Value == "items" && child.Kind == yaml.SequenceNode {
+			for _, item := range child.Content {
+				if resourceContainsTemplate(item) {
+					return true
+				}
+			}
+			continue
+		}
+		if containsTemplate(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTemplate(n *yaml.Node) bool {
+	if strings.Contains(n.Value, "{{") || strings.Contains(n.Tag, "{{") {
+		return true
+	}
+	for _, child := range n.Content {
+		if containsTemplate(child) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *parser) problem(file, code, msg string) {
 	d := Diagnostic{file, code, msg}
 	for _, old := range p.model.Diagnostics {
