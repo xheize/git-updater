@@ -193,12 +193,50 @@ func TestCRLFUnicodeQuotesAndDigest(t *testing.T) {
 func TestRenamedImageValidatesEffectiveArtifact(t *testing.T) {
 	files := map[string]string{"a.yaml": deployment("nginx:v1"), "kustomization.yaml": "resources: [a.yaml]\nimages:\n- name: nginx\n  newName: mirror.test/team/api\n  newTag: v2\n"}
 	m := Parse("abc", files)
+	requested := RequestedArtifacts(m, Intent{"rename", []Change{{Image: "nginx", Tag: "v3"}}})
+	if len(requested) != 1 || requested[0].Image != "mirror.test/team/api" || requested[0].Tag != "v3" {
+		t.Fatalf("wrong registry resolution: %+v", requested)
+	}
 	p, err := BuildPlan(m, files, Intent{"rename", []Change{{Image: "nginx", Tag: "v3"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(p.Artifacts) != 1 || p.Artifacts[0].Image != "mirror.test/team/api" || p.Artifacts[0].Tag != "v3" || len(m.Uses[0].Overrides) != 2 {
 		t.Fatalf("%+v %+v", p, m.Uses)
+	}
+}
+
+func TestPinnedImageUsesVerifiedArtifactAndPreservesFormatting(t *testing.T) {
+	oldDigest := "sha256:" + strings.Repeat("a", 64)
+	newDigest := "sha256:" + strings.Repeat("b", 64)
+	for _, old := range []string{"registry.test/api:v1@" + oldDigest, "registry.test/api@" + oldDigest} {
+		raw := strings.ReplaceAll("# keep\n"+deployment("'"+old+"' # pinned"), "\n", "\r\n")
+		files := map[string]string{"pinned.yaml": raw, "tagged.yaml": strings.ReplaceAll(deployment("registry.test/api:v1"), "name: api", "name: tagged")}
+		in := Intent{"pinned", []Change{{Image: "registry.test/api", Tag: "v2"}}}
+		model := Parse("abc", files)
+		for _, artifact := range []Artifact{{Image: "registry.test/api", Tag: "v2"}, {Image: "registry.test/api", Tag: "v2", Digest: "invalid"}, {Image: "registry.test/other", Tag: "v2", Digest: newDigest}, {Image: "registry.test/api", Tag: "wrong", Digest: newDigest}} {
+			if _, err := BuildPlan(model, files, in, artifact); err == nil {
+				t.Fatalf("unverified pin accepted: %+v", artifact)
+			}
+		}
+		p, err := BuildPlan(model, files, in, Artifact{Image: "registry.test/api", Tag: "v2", Digest: newDigest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := Apply(files, p.Mutations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after["pinned.yaml"] != strings.Replace(raw, old, "registry.test/api:v2@"+newDigest, 1) || after["tagged.yaml"] != strings.Replace(files["tagged.yaml"], ":v1", ":v2", 1) {
+			t.Fatalf("unexpected mutation: %+v", after)
+		}
+		if len(p.Artifacts) != 1 || p.Artifacts[0].Digest != newDigest {
+			t.Fatalf("missing artifact: %+v", p.Artifacts)
+		}
+		noop, err := BuildPlan(Parse("next", after), after, in, p.Artifacts...)
+		if err != nil || len(noop.Mutations) != 0 {
+			t.Fatalf("not idempotent: %+v %v", noop, err)
+		}
 	}
 }
 

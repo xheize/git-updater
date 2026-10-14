@@ -194,20 +194,21 @@ func (g *gitManager) preview(ctx context.Context, in controller.Intent, baseline
 	if err != nil {
 		return empty, err
 	}
-	p, err := controller.BuildPlan(model, files, in)
+	artifacts := controller.RequestedArtifacts(model, in)
+	for i, a := range artifacts {
+		artifact, err := g.verifyArtifact(ctx, controller.Change{Image: a.Image, Tag: a.Tag})
+		if err != nil {
+			return empty, fmt.Errorf("%w: %v", controller.ErrInvalid, err)
+		}
+		artifacts[i] = artifact
+	}
+	p, err := controller.BuildPlan(model, files, in, artifacts...)
 	if err != nil {
 		return empty, err
 	}
 	p.Identity = identity
 	p.Branch = branch
 	p.Scope, _ = repositoryScope()
-	for i, a := range p.Artifacts {
-		artifact, err := g.verifyArtifact(ctx, controller.Change{Image: a.Image, Tag: a.Tag})
-		if err != nil {
-			return empty, fmt.Errorf("%w: %v", controller.ErrInvalid, err)
-		}
-		p.Artifacts[i] = artifact
-	}
 	if err := g.jobStore.savePlan(p, true); err != nil {
 		return empty, err
 	}
@@ -297,7 +298,7 @@ func (g *gitManager) applyPlan(ctx context.Context, id string) (controller.Plan,
 	if err != nil {
 		return p, err
 	}
-	expected, err := controller.BuildPlan(model, files, p.Intent)
+	expected, err := controller.BuildPlan(model, files, p.Intent, p.Artifacts...)
 	if err != nil {
 		return p, err
 	}

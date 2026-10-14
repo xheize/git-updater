@@ -132,6 +132,56 @@ func TestConcurrentApplyPublishesOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestPinnedImagePublicationAndArtifactConflict(t *testing.T) {
+	g := newWorkTestManager(t, map[string]string{"app.yaml": workload("registry.test/api:v1@sha256:" + strings.Repeat("a", 64))})
+	ctx := context.Background()
+	in := controller.Intent{ID: "pinned-release", Changes: []controller.Change{{Image: "registry.test/api", Tag: "v2"}}}
+	p, err := g.Preview(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Artifacts) != 1 || len(p.Mutations) != 1 || p.Mutations[0].NewValue != "registry.test/api:v2@"+p.Artifacts[0].Digest {
+		t.Fatalf("bad plan: %+v", p)
+	}
+	// Persist/reload must preserve the digest required to reconstruct the plan.
+	saved, err := g.jobStore.GetPlan(p.ID)
+	if err != nil || saved.Artifacts[0] != p.Artifacts[0] {
+		t.Fatalf("persistence: %+v %v", saved, err)
+	}
+	base, _ := g.repo.Head()
+	// A registry resolution differing from the reviewed artifact must stop before Git writes.
+	saved.Artifacts[0].Digest = "sha256:" + strings.Repeat("c", 64)
+	if err := g.jobStore.savePlan(saved, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.ApplyPlan(ctx, p.ID); !errors.Is(err, controller.ErrConflict) {
+		t.Fatalf("changed artifact accepted: %v", err)
+	}
+	head, _ := g.repo.Head()
+	if head.Hash() != base.Hash() {
+		t.Fatal("artifact conflict changed Git")
+	}
+	if err := g.jobStore.savePlan(p, false); err != nil {
+		t.Fatal(err)
+	}
+	published, err := g.ApplyPlan(ctx, p.ID)
+	if err != nil || published.State != "published" {
+		t.Fatalf("publish: %+v %v", published, err)
+	}
+	data, err := os.ReadFile(filepath.Join(g.workspace, "app.yaml"))
+	if err != nil || !strings.Contains(string(data), p.Mutations[0].NewValue) {
+		t.Fatalf("wrong published image: %s %v", data, err)
+	}
+	// Exercise the same worker path used by Zot: current tag is a no-op;
+	// the next tag publishes with a new pin.
+	if outcome, err := g.work(Job{ID: "pinned-noop", Image: "registry.test/api", Tag: "v2"}); err != nil || outcome != OutcomeAlreadySatisfied {
+		t.Fatalf("noop: %s %v", outcome, err)
+	}
+	if outcome, err := g.work(Job{ID: "pinned-webhook", Image: "registry.test/api", Tag: "v3"}); err != nil || outcome != OutcomePublished {
+		t.Fatalf("worker: %s %v", outcome, err)
+	}
+}
+
 func TestEmptyWorkspaceAndMismatchPreservation(t *testing.T) {
 	g := newWorkTestManager(t, map[string]string{"a.yaml": workload("nginx:v1")})
 	raw, _ := g.originURL()

@@ -146,7 +146,9 @@ func (g *gitManager) verifyRepository(ctx context.Context, branch string) (contr
 func (g *gitManager) verifyArtifact(ctx context.Context, c controller.Change) (controller.Artifact, error) {
 	out := controller.Artifact{Image: c.Image, Tag: c.Tag}
 	if os.Getenv("CONTROLLER_LOCAL_MODE") == "true" {
-		out.Digest = "unchecked-local-test"
+		// Deterministic synthetic artifact for local-only integration tests.
+		sum := sha256.Sum256([]byte(c.Image + ":" + c.Tag))
+		out.Digest = "sha256:" + hex.EncodeToString(sum[:])
 		return out, nil
 	}
 	n, err := reference.ParseNormalizedNamed(c.Image)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,6 +47,9 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	}
 	for _, name := range []string{"api.yaml", "worker.yaml"} {
 		content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: " + strings.TrimSuffix(name, ".yaml") + "\nspec:\n  template:\n    spec:\n      containers:\n        - name: main\n          image: registry.test/demo/api:v1\n"
+		if name == "worker.yaml" {
+			content = strings.Replace(content, ":v1", ":v1@sha256:"+strings.Repeat("a", 64), 1)
+		}
 		if err := os.WriteFile(filepath.Join(seed, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -225,7 +229,8 @@ func TestAPIProcessLocalGit(t *testing.T) {
 	zotResult := request("POST", "/webhook/zot", zot, contractAuth(), 202)
 	zotJobID := zotResult["jobId"].(string)
 	waitJob(zotJobID, "succeeded")
-	if !strings.Contains(gitAt(origin, "show", "main:worker.yaml"), "registry.test/demo/api:v4") {
+	wantPinned := fmt.Sprintf("registry.test/demo/api:v4@sha256:%x", sha256.Sum256([]byte("registry.test/demo/api:v4")))
+	if !strings.Contains(gitAt(origin, "show", "main:worker.yaml"), wantPinned) {
 		t.Fatal("Zot request did not reach the remote")
 	}
 	beforeSync := head()

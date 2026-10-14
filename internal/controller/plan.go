@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	digest "github.com/opencontainers/go-digest"
 	"gopkg.in/yaml.v3"
 )
 
@@ -121,7 +122,27 @@ func useKey(u Use) string {
 	return u.Resource + "|" + u.Container + "|" + u.Environment + "|" + u.Source.Path
 }
 
-func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
+// RequestedArtifacts resolves registry names after Kustomize renames. The caller
+// verifies these tags before planning and again before publishing.
+func RequestedArtifacts(model Model, in Intent) []Artifact {
+	seen := map[string]Artifact{}
+	for _, c := range in.Changes {
+		for _, u := range model.Uses {
+			if selected(u, c) {
+				a := Artifact{Image: ImageName(u.EffectiveImage), Tag: c.Tag}
+				seen[a.Image+":"+a.Tag] = a
+			}
+		}
+	}
+	out := make([]Artifact, 0, len(seen))
+	for _, a := range seen {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Image+":"+out[i].Tag < out[j].Image+":"+out[j].Tag })
+	return out
+}
+
+func BuildPlan(model Model, files map[string]string, in Intent, verified ...Artifact) (Plan, error) {
 	p := Plan{ID: in.ID, Intent: in, BaseRevision: model.Revision, Atomic: true, State: "planned", CreatedAt: time.Now().UTC(), Mutations: []Mutation{}, Impact: []Impact{}, Diffs: []FileDiff{}, Artifacts: []Artifact{}}
 	if err := ValidateIntent(in); err != nil {
 		return p, err
@@ -131,6 +152,14 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 	}
 	targets := map[string]Mutation{}
 	expected := map[string]string{}
+	resolved := map[string]Artifact{}
+	for _, a := range verified {
+		key := ImageName(a.Image) + ":" + a.Tag
+		if old, ok := resolved[key]; ok && old.Digest != a.Digest {
+			return p, fmt.Errorf("%w: conflicting registry digests", ErrInvalid)
+		}
+		resolved[key] = a
+	}
 	for _, c := range in.Changes {
 		found := false
 		envFound := map[string]bool{}
@@ -140,17 +169,22 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 			}
 			found = true
 			envFound[u.Environment] = true
-			// Dropping an existing digest would change pinning semantics.
-			if strings.Contains(u.SourceImage, "@") || strings.Contains(u.EffectiveImage, "@") {
-				return p, fmt.Errorf("%w: digest-pinned images require a digest intent", ErrInvalid)
-			}
 			next := withTag(u.EffectiveImage, c.Tag)
+			raw := withTag(u.Target.Value, c.Tag)
+			// Preserve pinning, but resolve the new tag instead of reusing the old digest.
+			if strings.Contains(u.SourceImage, "@") || strings.Contains(u.EffectiveImage, "@") {
+				a := resolved[ImageName(u.EffectiveImage)+":"+c.Tag]
+				if digest.Digest(a.Digest).Validate() != nil || u.Target.TagOnly || len(u.Overrides) != 0 {
+					return p, fmt.Errorf("%w: digest-pinned images require a verified digest and a direct image target", ErrInvalid)
+				}
+				next += "@" + a.Digest
+				raw += "@" + a.Digest
+			}
 			key := useKey(u)
 			if old, ok := expected[key]; ok && old != next {
 				return p, fmt.Errorf("%w: conflicting image intents", ErrInvalid)
 			}
 			expected[key] = next
-			raw := withTag(u.Target.Value, c.Tag)
 			if u.Target.TagOnly {
 				raw = c.Tag
 			}
@@ -210,6 +244,9 @@ func BuildPlan(model Model, files map[string]string, in Intent) (Plan, error) {
 		}
 		if selected {
 			a := Artifact{Image: ImageName(u.EffectiveImage), Tag: ImageTag(u.EffectiveImage)}
+			if verified, ok := resolved[a.Image+":"+a.Tag]; ok {
+				a.Digest = verified.Digest
+			}
 			artifacts[a.Image+":"+a.Tag] = a
 		}
 		if u.EffectiveImage != before.EffectiveImage {
