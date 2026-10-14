@@ -125,6 +125,8 @@ export GIT_UPDATER_API_KEY='<controller-api-key>'
 
 Pod의 `imagePullSecret`은 서버 내부 registry API 인증을 대신하지 않습니다. registry token의 자동 challenge 교환은 미지원입니다. 태그는 변경 가능한 이름이므로 digest 확인이 이미지의 영구 불변성을 보장하지는 않습니다.
 
+직접 선언된 workload 이미지가 `image:tag@sha256:...` 또는 `image@sha256:...`로 고정돼 있으면 새 태그의 registry digest를 검증해 `image:new-tag@new-digest`로 함께 갱신합니다. 기존에 태그만 쓰던 참조에는 digest를 추가하지 않습니다. 계획에 저장한 digest를 게시 직전에 다시 확인하며, 태그가 이동했다면 변경을 거절합니다. Kustomize의 `images.digest` 변환은 아직 지원하지 않습니다.
+
 ## 자동 변경과 정책
 
 - `AUTO_UPDATE=true`: webhook 등 자동 이미지 변경 작업을 허용합니다. 기본값은 비활성입니다.

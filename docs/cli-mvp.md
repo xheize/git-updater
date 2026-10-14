@@ -11,7 +11,7 @@
 - 같은 base를 공유할 때 요청하지 않은 환경까지 변경되면 거절한다. 필요한 override가 없다면 먼저 Git에서 추가해야 한다. override 자동 삽입은 없다.
 - Helm, remote bases, patches, replacements, generators, plugins, namespace/name 변환, anchors/aliases/merge keys, Git submodules 등은 지원하지 않는다. 선택 scope에 parser diagnostic이 있으면 **전체 ChangeSet을 거절**한다. 지원 불가 구문을 일반 YAML로 우회하지 않는다.
 - `kyverno.io/v1`의 `Policy`/`ClusterPolicy`는 `spec` 내부의 `{{ ... }}` 실행 시점 표현식을 원문 그대로 보존한다. 해당 정책을 렌더링하거나 정책 내부 이미지를 변경 대상으로 수집하지 않으며, 클러스터 admission 이후의 영향은 계산하지 않는다. 정책 외부의 템플릿, 정책 identity의 템플릿, 중복 key/anchor 등은 계속 차단한다. 여러 YAML document나 `v1/List`가 섞여 있어도 리소스별로 이 경계를 검증한다. YAML 주석의 `{{`는 템플릿 진단 대상이 아니다.
-- 이미 digest로 고정된 참조는 tag 변경으로 풀지 않는다. digest intent와 Helm values binding은 후속 범위다.
+- 직접 선언된 digest 고정 이미지는 새 tag의 검증된 registry digest로 tag와 digest를 함께 갱신한다. 태그만 있는 이미지는 기존 형식을 유지한다. 명시적 digest intent, Kustomize digest override와 Helm values binding은 후속 범위다.
 - 기존 scalar의 byte span만 바꾸고 주석·나머지 공백·key order·CRLF·quote를 보존한다. 새 tag가 숫자/boolean으로 읽힐 수 있으면 그 scalar만 quote한다. 안전하게 위치를 확인할 수 없는 scalar는 거절한다. preview는 전체 파일의 unified hunk를 표시하지만 실제 commit의 변경은 scalar 교체다.
 - YAML 한 파일 2 MiB, scope 내 YAML 합계 32 MiB/10,000개 및 dependency traversal 제한이 있다. 이 MVP의 검증은 Kubernetes 전체 schema/admission validation이나 native Helm/Kustomize의 모든 동작 검증을 대체하지 않는다.
 
@@ -34,7 +34,7 @@
 
 운영 provider는 현재 **github.com만** 지원한다. GitHub API에서 immutable ID, 접근 권한, archived/disabled 및 branch protection을 확인한다. protected branch에는 직접 게시하지 않으며 PR workflow는 미구현이다. REST에서 보이지 않는 추가 Git 규칙은 최종 push에서도 거절될 수 있다. 최초 확인한 provider ID와 branch를 SQLite에 고정해 다른 저장소를 같은 DB로 변경하는 것을 차단한다. rename 이후 URL 설정과 workspace 교체는 운영자가 수행해야 하며 같은 ID/branch의 DB 기록은 유지할 수 있다.
 
-Registry는 HTTPS manifest HEAD로 tag 존재와 digest를 확인한다. **override 이후 실제 effective image 이름**을 검증한다. preview와 apply에서 digest가 달라지면 거절한다. 자동 Bearer challenge/token 교환 및 Docker credential-helper 연동은 없다. 필요한 registry token을 운영자가 제공해야 한다. 태그 자체는 mutable하므로 마지막 확인 이후 tag 이동까지 방지하는 보장은 없으며, 재현성 강화를 위한 digest pinning은 별도 기능이다.
+Registry는 HTTPS manifest HEAD로 tag 존재와 digest를 확인한다. **override 이후 실제 effective image 이름**을 검증한다. preview와 apply에서 digest가 달라지면 거절한다. 자동 Bearer challenge/token 교환 및 Docker credential-helper 연동은 없다. 필요한 registry token을 운영자가 제공해야 한다. 기존 digest 고정 참조는 검증된 digest를 YAML에도 기록한다. 태그만 쓰는 참조는 마지막 확인 이후 tag 이동까지 방지하지 못한다.
 
 GitHub와 registry 검증에 사용하는 자격 증명은 서버에만 둔다. CLI에는 controller API key만 제공한다.
 
@@ -148,7 +148,7 @@ go test -buildvcs=false ./... -count=1 -timeout 150s
 go vet ./...
 ```
 
-후속 범위는 웹 UI, Helm explicit bindings, 전체 Kustomize/native render 검증, PR/approval 역할 분리, GitLab/Enterprise providers, registry token negotiation, digest mutation, multi-repo release 및 HA다.
+후속 범위는 웹 UI, Helm explicit bindings, 전체 Kustomize/native render 검증, PR/approval 역할 분리, GitLab/Enterprise providers, registry token negotiation, 명시적 digest intent와 Kustomize digest override, multi-repo release 및 HA다.
 
 검증 프로토콜 근거: [GitHub repository API](https://docs.github.com/en/rest/repos/repos#get-a-repository), [OCI manifest 존재 확인](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#checking-if-content-exists-in-the-registry), [Kustomize image transformation](https://github.com/kubernetes-sigs/kustomize/blob/master/api/filters/imagetag/updater.go).
 
